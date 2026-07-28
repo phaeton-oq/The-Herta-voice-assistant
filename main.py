@@ -15,6 +15,8 @@ from actions.code_tools import CodeToolProvider
 from actions.self_check import maybe_self_check_and_repair
 from actions.system_actions import SystemActionRunner, build_system_actions_instruction
 from actions.tool_layer import ToolCall, ToolResult, ToolSpec
+from actions.vision import VisionProvider
+from actions.vision_tools import VisionToolProvider
 from actions.web_search import WebSearchProvider
 from brain.auto_extractor import AutoFactExtractor
 from brain.long_memory import LongMemoryStore
@@ -41,6 +43,8 @@ from wakeword.coordinator import WakeWordCoordinator
 
 
 EXIT_COMMANDS = {"exit", "quit", "q", "выход"}
+# Профиль владельца в общей папке людей: у голоса, GUI и консоли он один.
+OWNER_PERSON_ID = "owner"
 TTS_TEST_PHRASE = "Это Великая Герта. Проверка голосового вывода завершена."
 GOOGLE_AI_PROVIDER_NAMES = {"google_ai", "google", "gemini"}
 
@@ -334,6 +338,60 @@ def _maybe_followup_in_character(
     return followup_reply.strip() or action_result.message
 
 
+def update_owner_impression(impression_maker, messages: list[dict[str, str]], logger: logging.Logger) -> None:
+    """Считает реплику владельца и раз в N обращений пересматривает мнение о нём."""
+    if impression_maker is None:
+        return
+    try:
+        profile = impression_maker.store.note_turn(OWNER_PERSON_ID, 'владелец')
+        impression_maker.maybe_update(OWNER_PERSON_ID, messages, turns=profile.turns)
+    except Exception as exc:
+        logger.warning('Впечатление о владельце не обновилось: %s', exc)
+
+
+def _run_action_plan(
+    *,
+    plan: list[ToolCall],
+    user_text: str,
+    messages: list[dict[str, str]],
+    chat_client: ChatClient,
+    config: AppConfig,
+    logger: logging.Logger,
+    system_action_runner: SystemActionRunner,
+) -> str:
+    """Выполняет все шаги просьбы и просит модель связать результаты в ответ."""
+    logger.info("Action plan: %s", ', '.join(call.name for call in plan))
+
+    report: list[str] = []
+    for index, call in enumerate(plan, start=1):
+        result = system_action_runner.execute_tool_call(call)
+        status = 'выполнено' if result.executed else 'не выполнено'
+        logger.info("Plan step %d/%d: %s -> %s", index, len(plan), call.name, status)
+        report.append(f'Шаг {index}. {call.name} — {status}.\n{result.message.strip()}')
+
+    summary = '\n\n'.join(report)
+    followup_messages = list(messages) + [
+        {
+            'role': 'system',
+            'content': (
+                'Ты выполнила несколько действий по просьбе собеседника. Ниже — что получилось. '
+                'Ответь своим голосом: пройди по шагам, скажи результат каждого и дай оценку по существу. '
+                'Не пересказывай сырой вывод целиком и не выдумывай того, чего в результатах нет. '
+                'Если шаг не выполнился — скажи прямо.'
+            ),
+        },
+        {'role': 'user', 'content': f'Просьба была:\n{user_text}\n\nЧто получилось:\n{summary}'},
+    ]
+
+    try:
+        reply = chat_client.chat(followup_messages)
+    except Exception as exc:
+        logger.warning('Не удалось собрать ответ по плану: %s', exc)
+        return summary
+
+    return reply.strip() or summary
+
+
 def run_turn(
     *,
     user_text: str,
@@ -392,6 +450,30 @@ def run_turn(
         else:
             elapsed_seconds = time.perf_counter() - started_at
             logger.info("Assistant reply ready in %.1fs.", elapsed_seconds)
+            return finish_assistant_turn(
+                user_text=user_text,
+                assistant_reply=assistant_reply,
+                messages=messages,
+                tts_engine=tts_engine,
+                config=config,
+                logger=logger,
+                locked_prefix_count=locked_prefix_count,
+                memory_store=memory_store,
+            )
+
+    # Многошаговая просьба: выполняем все пункты, потом отдаём модели свод.
+    if system_action_runner is not None:
+        plan = system_action_runner.detect_plan(user_text)
+        if plan:
+            assistant_reply = _run_action_plan(
+                plan=plan,
+                user_text=user_text,
+                messages=messages,
+                chat_client=chat_client,
+                config=config,
+                logger=logger,
+                system_action_runner=system_action_runner,
+            )
             return finish_assistant_turn(
                 user_text=user_text,
                 assistant_reply=assistant_reply,
@@ -473,6 +555,7 @@ def interactive_loop(
     system_action_runner: SystemActionRunner | None,
     auto_extractor: AutoFactExtractor | None = None,
     code_tool_provider: CodeToolProvider | None = None,
+    impression_maker=None,
 ) -> None:
     print("The Herta assistant ready. Type a message or 'exit' to quit.")
 
@@ -512,6 +595,8 @@ def interactive_loop(
             added = auto_extractor.on_turn_complete(messages)
             if added:
                 print(f"(долговременная память: +{added} факт(ов))")
+
+        update_owner_impression(impression_maker, messages, logger)
 
 
 def _prepare_stt_engine(config: AppConfig, logger: logging.Logger) -> STTEngine:
@@ -566,6 +651,7 @@ def voice_loop(
     system_action_runner: SystemActionRunner | None,
     auto_extractor: AutoFactExtractor | None = None,
     code_tool_provider: CodeToolProvider | None = None,
+    impression_maker=None,
 ) -> None:
     from audio.input import MicrophoneInput
     from audio.vad import StreamingVADSegmenter
@@ -683,6 +769,8 @@ def voice_loop(
                     added = auto_extractor.on_turn_complete(messages)
                     if added:
                         print(f"(долговременная память: +{added} факт(ов))")
+
+                update_owner_impression(impression_maker, messages, logger)
 
                 wake_coordinator.arm()
                 microphone.clear_queue()
@@ -955,7 +1043,40 @@ def main() -> int:
                 f"({'followup-in-character' if config.web_search.followup_in_character else 'raw'})."
             )
 
-    code_tool_provider = CodeToolProvider(config.code_tools) if config.code_tools.enabled else None
+    if config.system_control.enabled:
+        from desktop.control_tools import SystemControlToolProvider
+
+        control_tools = SystemControlToolProvider().callable_tools()
+        extra_runner_tools.extend(control_tools)
+        logger.info("System control ready: %d tools.", len(control_tools))
+        print(f"Управление компьютером: {len(control_tools)} инструментов (программы, звук, буфер, окна, файлы).")
+
+    vision_provider = VisionProvider(config.vision) if config.vision.enabled else None
+    if vision_provider is not None:
+        vision_tools = VisionToolProvider(vision_provider).callable_tools()
+        extra_runner_tools.extend(vision_tools)
+        logger.info("Vision ready. model=%s.", config.vision.model)
+        print(f"Vision: {config.vision.model} (локально, скажи «что у меня на экране»).")
+
+    # Память найденных ошибок общая: mypy и ruff кладут, переход к ошибке берёт.
+    diagnostics_store = None
+    if config.ide.enabled:
+        from desktop.ide_tools import DiagnosticsStore, IdeToolProvider
+
+        diagnostics_store = DiagnosticsStore()
+        ide_tools = IdeToolProvider(config.ide, diagnostics_store).callable_tools()
+        extra_runner_tools.extend(ide_tools)
+        logger.info("IDE tools ready: %d.", len(ide_tools))
+        print(f"IDE: {len(ide_tools)} инструментов (открыть файл, перейти к ошибке, тесты).")
+
+    code_tool_provider = (
+        CodeToolProvider(
+            config.code_tools,
+            on_diagnostics=diagnostics_store.capture if diagnostics_store is not None else None,
+        )
+        if config.code_tools.enabled
+        else None
+    )
     if code_tool_provider is not None:
         code_tools = code_tool_provider.callable_tools()
         extra_runner_tools.extend(code_tools)
@@ -1001,7 +1122,12 @@ def main() -> int:
 
     selected_model_name = config.google_ai.live_model if args.live_voice else _selected_model_name(config)
     long_memory_block = long_memory_store.format_for_prompt() if long_memory_store is not None else ''
-    messages = build_bootstrap_messages(selected_model_name, long_memory_block=long_memory_block or None)
+    # Локальные режимы (консоль, голос) — за клавиатурой сам разработчик.
+    messages = build_bootstrap_messages(
+        selected_model_name,
+        long_memory_block=long_memory_block or None,
+        is_owner=True,
+    )
     if config.system_actions.enabled:
         provider_supports_tools = config.llm_provider in GOOGLE_AI_PROVIDER_NAMES or args.live_voice
         messages.append(
@@ -1010,6 +1136,23 @@ def main() -> int:
                 "content": build_system_actions_instruction(structured_tools_available=provider_supports_tools),
             }
         )
+
+    # Впечатление о собеседнике добавляем до подсчёта locked_prefix_count,
+    # иначе защита от вытеснения съедет и блок вымоется историей.
+    people_store = None
+    if config.people.enabled:
+        from brain.people import PeopleStore
+
+        people_store = PeopleStore(config.people.directory)
+        owner_profile = people_store.load(OWNER_PERSON_ID, 'владелец')
+        profile_block = owner_profile.format_for_prompt()
+        if profile_block:
+            messages.append({'role': 'system', 'content': profile_block})
+        print(
+            f"Профиль собеседника: обращений {owner_profile.turns}, "
+            f"наблюдений {len(owner_profile.impression)}."
+        )
+
     locked_prefix_count = len(messages)
     memory_store = _build_memory_store(config, logger)
     if memory_store is not None:
@@ -1035,6 +1178,17 @@ def main() -> int:
         return 0
 
     chat_client = _build_chat_client(config)
+
+    # Впечатление о владельце: складывается так же, как о телеграмных собеседниках.
+    impression_maker = None
+    if people_store is not None:
+        from brain.impressions import ImpressionMaker
+
+        impression_maker = ImpressionMaker(
+            people_store,
+            chat_client,
+            every_turns=config.people.impression_every_turns,
+        )
 
     auto_extractor: AutoFactExtractor | None = None
     if long_memory_store is not None and config.long_memory.auto_extract_enabled:
@@ -1082,6 +1236,7 @@ def main() -> int:
                 system_action_runner=system_action_runner,
                 auto_extractor=auto_extractor,
                 code_tool_provider=code_tool_provider,
+                impression_maker=impression_maker,
             )
         except Exception as exc:
             logger.error("Voice loop failed: %s", exc)
@@ -1099,6 +1254,7 @@ def main() -> int:
         system_action_runner=system_action_runner,
         auto_extractor=auto_extractor,
         code_tool_provider=code_tool_provider,
+        impression_maker=impression_maker,
     )
     return 0
 

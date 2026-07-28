@@ -29,9 +29,21 @@ class CheckOutcome:
 class CodeToolProvider:
     """Exposes mypy/ruff as safe, read-only CallableTool instances."""
 
-    def __init__(self, config: CodeToolsConfig) -> None:
+    def __init__(self, config: CodeToolsConfig, on_diagnostics=None) -> None:
         self.config = config
         self.project_root = Path(config.project_root).resolve()
+        # Наблюдатель за находками: складывает их туда, откуда работает
+        # переход к ошибке в редакторе.
+        self._on_diagnostics = on_diagnostics
+
+    def _report_diagnostics(self, output: str, source: str) -> int:
+        if self._on_diagnostics is None or not output.strip():
+            return 0
+        try:
+            return self._on_diagnostics(output, source, self.project_root)
+        except Exception as exc:
+            logger.debug('Не удалось запомнить диагностики %s: %s', source, exc)
+            return 0
 
     def callable_tools(self) -> list[CallableTool]:
         if not self.config.enabled:
@@ -101,8 +113,14 @@ class CodeToolProvider:
                 executed=False,
             )
 
-        verdict = 'Чисто, претензий нет.' if outcome.returncode == 0 else 'mypy нашёл проблемы.'
-        message = f'{verdict}\n\n{outcome.output.strip() or "(вывод пуст)"}'
+        message = _format_check_output(
+            outcome,
+            clean=f'Чисто: mypy к {Path(target).name} претензий не имеет.',
+            dirty='mypy нашёл проблемы.',
+        )
+        found = self._report_diagnostics(outcome.output, 'mypy')
+        if found:
+            message += f'\n\nЗапомнила {found} мест(а) — скажи «открой первую ошибку».'
         return ToolResult(
             action_name='type_check',
             message=_truncate(message, MAX_OUTPUT_CHARS),
@@ -133,8 +151,14 @@ class CodeToolProvider:
                 executed=False,
             )
 
-        verdict = 'Без замечаний.' if outcome.returncode == 0 else 'ruff нашёл замечания.'
-        message = f'{verdict}\n\n{outcome.output.strip() or "(вывод пуст)"}'
+        message = _format_check_output(
+            outcome,
+            clean=f'Чисто: ruff к {Path(target).name} замечаний не имеет.',
+            dirty='ruff нашёл замечания.',
+        )
+        found = self._report_diagnostics(outcome.output, 'ruff')
+        if found:
+            message += f'\n\nЗапомнила {found} мест(а) — скажи «открой первую ошибку».'
         return ToolResult(
             action_name='lint_code',
             message=_truncate(message, MAX_OUTPUT_CHARS),
@@ -143,11 +167,11 @@ class CodeToolProvider:
         )
 
     def run_mypy(self, target: str) -> CheckOutcome:
-        args = [sys.executable, '-m', 'mypy', *self.config.mypy_args, target]
+        args = [_console_python(), '-m', 'mypy', *self.config.mypy_args, target]
         return _run_subprocess(args, self.config.timeout_seconds, tool='mypy')
 
     def run_ruff(self, target: str) -> CheckOutcome:
-        args = [sys.executable, '-m', 'ruff', *self.config.ruff_args, target]
+        args = [_console_python(), '-m', 'ruff', *self.config.ruff_args, target]
         return _run_subprocess(args, self.config.timeout_seconds, tool='ruff')
 
     def check_snippet(self, source: str) -> list[CheckOutcome]:
@@ -181,6 +205,21 @@ class CodeToolProvider:
         return results
 
 
+def _console_python() -> str:
+    """Путь к интерпретатору с консолью.
+
+    В графическом режиме процесс запущен через pythonw.exe, у которого нет
+    консоли и sys.stdout равен None. Анализаторы, запущенные им, отрабатывают
+    и возвращают код ошибки, но весь их вывод пропадает — находки не доходят.
+    """
+    executable = Path(sys.executable)
+    if executable.name.lower() == 'pythonw.exe':
+        console = executable.with_name('python.exe')
+        if console.exists():
+            return str(console)
+    return sys.executable
+
+
 def _run_subprocess(args: list[str], timeout_seconds: int, *, tool: str) -> CheckOutcome:
     try:
         proc = subprocess.run(
@@ -209,6 +248,18 @@ def _run_subprocess(args: list[str], timeout_seconds: int, *, tool: str) -> Chec
         output_parts.append(proc.stderr)
     combined = '\n'.join(part.strip() for part in output_parts if part.strip())
     return CheckOutcome(tool=tool, returncode=proc.returncode, output=combined, timed_out=False)
+
+
+def _format_check_output(outcome: CheckOutcome, *, clean: str, dirty: str) -> str:
+    """Собирает ответ анализатора.
+
+    При чистом результате вывод пуст, и приписка «(вывод пуст)» читалась так,
+    будто проверка не отработала. Теперь в этом случае её просто нет.
+    """
+    body = outcome.output.strip()
+    if outcome.returncode == 0:
+        return f'{clean}\n\n{body}' if body else clean
+    return f'{dirty}\n\n{body}' if body else f'{dirty} Подробностей не выдал.'
 
 
 def _truncate(text: str, limit: int) -> str:

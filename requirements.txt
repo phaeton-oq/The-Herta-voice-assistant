@@ -1,17 +1,46 @@
+# --- Ядро: LLM-провайдеры, конфиг, вывод ---
 ollama
 openai
 httpx
 google-genai
 omegaconf
-sounddevice
-faster-whisper
-silero-vad
-edge-tts
 numpy
 pydantic
 python-dotenv
 rich
+
+# --- Голос: запись, сегментация, распознавание, синтез ---
+sounddevice
+faster-whisper
+silero-vad
+edge-tts
 piper-tts
+
+# --- Графическая оболочка (gui_app.py) ---
+PySide6
+pygments
+
+# --- Взаимодействие с компьютером (desktop/) ---
+# keyboard ставит системный хук: на Windows иногда требует прав администратора.
+keyboard
+pyperclip
+mss
+pillow
+# Управление громкостью на Windows. На Linux не нужны и не ставятся.
+pycaw; sys_platform == "win32"
+comtypes; sys_platform == "win32"
+pygetwindow; sys_platform == "win32"
+
+# --- Статический анализ (code tools и самопроверка) ---
 mypy
 ruff
-# pvporcupine  # optional, for wake-word mode=porcupine|both
+
+# --- Опциональное ---
+# pvporcupine  # wake-word режим porcupine|both
+#
+# torch ставится отдельно и вручную: колесо зависит от версии CUDA.
+# Пример для CUDA 12.8:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Нужен для Silero TTS и RVC. Для чисто текстового режима не требуется.
+#
+# ffmpeg — не пакет Python, ставится в систему. Нужен для голосовых в Telegram.

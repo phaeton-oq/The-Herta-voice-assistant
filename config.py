@@ -73,7 +73,7 @@ class DeepSeekConfig:
     model: str = 'deepseek-v4-flash'
     timeout_seconds: float = 120.0
     temperature: float = 0.55
-    max_tokens: int = 700
+    max_tokens: int = 2000
     retry_attempts: int = 4
     rate_limit_retries: int = 2
 
@@ -85,7 +85,7 @@ class CerebrasConfig:
     model: str = 'llama-3.3-70b'
     timeout_seconds: float = 60.0
     temperature: float = 0.55
-    max_tokens: int = 700
+    max_tokens: int = 2000
     retry_attempts: int = 4
     rate_limit_retries: int = 2
 
@@ -98,7 +98,7 @@ class GoogleAIConfig:
     fallback_model: str | None = None
     timeout_seconds: float = 45.0
     temperature: float = 0.55
-    max_tokens: int = 700
+    max_tokens: int = 2000
     retry_attempts: int = 0
     rate_limit_retries: int = 2
     system_instruction_enabled: bool = False
@@ -247,7 +247,11 @@ class CodeToolsConfig:
         '--no-error-summary',
         '--ignore-missing-imports',
     )
-    ruff_args: tuple[str, ...] = ('check', '--no-cache', '--select=E,F,W,UP,B,SIM')
+    # concise обязателен: в развёрнутом формате ruff печатает находки со
+    # стрелками и фрагментами кода, из которых не вытащить путь и строку.
+    ruff_args: tuple[str, ...] = (
+        'check', '--no-cache', '--output-format=concise', '--select=E,F,W,UP,B,SIM',
+    )
     timeout_seconds: int = 30
     self_check_enabled: bool = False
     self_check_max_snippets: int = 2
@@ -261,6 +265,101 @@ class LongMemoryConfig:
     max_facts: int = 200
     auto_extract_enabled: bool = True
     auto_extract_every_turns: int = 6
+
+
+@dataclass(slots=True)
+class IdeConfig:
+    """Связь с редактором: открыть файл, прыгнуть к ошибке, прогнать тесты."""
+
+    enabled: bool = False
+    # auto | vscode | intellij | путь к своей команде
+    editor: str = 'auto'
+    project_root: str = '.'
+    test_timeout_seconds: int = 300
+
+
+@dataclass(slots=True)
+class ShellConfig:
+    """Команды из белого списка. Каждый запуск подтверждается человеком."""
+
+    enabled: bool = False
+    working_dir: str = '.'
+    timeout_seconds: int = 60
+
+
+@dataclass(slots=True)
+class SystemControlConfig:
+    """Обратимое управление компьютером: программы, звук, буфер, окна, поиск файлов."""
+
+    enabled: bool = False
+
+
+@dataclass(slots=True)
+class HotkeysConfig:
+    enabled: bool = False
+    # Показать/скрыть окно Герты из любого приложения.
+    summon: str = 'ctrl+shift+h'
+    # Удерживай — говори — отпусти: текст напечатается в активное окно.
+    dictation: str = 'ctrl+shift+d'
+    # Включить/выключить голосовой режим.
+    voice_toggle: str = 'ctrl+shift+v'
+    # Разобрать выделенный в редакторе фрагмент.
+    ask_selection: str = 'ctrl+shift+a'
+
+
+@dataclass(slots=True)
+class VisionConfig:
+    enabled: bool = False
+    # Локальная мультимодальная модель в Ollama. 3b влезает в 6 ГБ рядом с Whisper и RVC.
+    model: str = 'qwen2.5vl:3b'
+    host: str = 'http://127.0.0.1:11434'
+    timeout_seconds: float = 180.0
+    # Индекс монитора для скриншота: 1 - основной, 0 - все мониторы разом.
+    monitor_index: int = 1
+
+
+@dataclass(slots=True)
+class PeopleConfig:
+    """Профили собеседников: впечатление Герты и факты о человеке.
+
+    Хранятся отдельно от личной памяти владельца — по файлу на человека.
+    """
+
+    enabled: bool = False
+    directory: str = 'data/people'
+    # Раз во сколько реплик пересматривать впечатление (доп. вызов модели).
+    impression_every_turns: int = 6
+
+
+@dataclass(slots=True)
+class TelegramConfig:
+    enabled: bool = False
+    bot_token: str | None = None
+    # Chat id владельца. Только он получает доступ к памяти и веб-поиску.
+    owner_chat_id: int | None = None
+    # Пустой список = отвечать всем. Иначе — только перечисленным chat id.
+    allowed_chat_ids: tuple[int, ...] = ()
+    poll_timeout_seconds: int = 25
+    request_timeout_seconds: float = 40.0
+    history_messages: int = 12
+    max_reply_chars: int = 3500
+    cooldown_seconds: float = 2.0
+    guest_web_search: bool = False
+    # Отдельный прокси только для api.telegram.org (если он заблокирован у провайдера).
+    # Пример: socks5://127.0.0.1:10808 — требует `pip install socksio`.
+    proxy: str | None = None
+    # Голосовые: распознавать входящие и отвечать голосом Герты.
+    voice_enabled: bool = False
+    # mirror - голосом только в ответ на голосовое; always - всегда; never - никогда.
+    voice_reply_mode: str = 'mirror'
+    # Длинную реплику целиком озвучивать бессмысленно: текст уйдёт полностью, голос - до этого предела.
+    voice_max_chars: int = 700
+    # Входящие голосовые длиннее этого не принимаем.
+    voice_max_input_seconds: int = 180
+    # История чатов на диске: переживает перезапуск моста.
+    persist_history: bool = True
+    store_path: str = 'data/telegram_chats.sqlite3'
+    store_max_messages_per_chat: int = 200
 
 
 @dataclass(slots=True)
@@ -306,6 +405,13 @@ class AppConfig:
     long_memory: LongMemoryConfig = field(default_factory=LongMemoryConfig)
     code_tools: CodeToolsConfig = field(default_factory=CodeToolsConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    people: PeopleConfig = field(default_factory=PeopleConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
+    hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
+    system_control: SystemControlConfig = field(default_factory=SystemControlConfig)
+    shell: ShellConfig = field(default_factory=ShellConfig)
+    ide: IdeConfig = field(default_factory=IdeConfig)
     wakeword: WakeWordConfig = field(default_factory=WakeWordConfig)
     system_actions: SystemActionsConfig = field(default_factory=SystemActionsConfig)
 
@@ -492,6 +598,63 @@ def load_config() -> AppConfig:
             max_facts=int(os.getenv('LONG_MEMORY_MAX_FACTS', '200')),
             auto_extract_enabled=_get_bool(os.getenv('LONG_MEMORY_AUTO_EXTRACT'), True),
             auto_extract_every_turns=int(os.getenv('LONG_MEMORY_AUTO_EXTRACT_EVERY_TURNS', '6')),
+        ),
+        telegram=TelegramConfig(
+            enabled=_get_bool(os.getenv('TELEGRAM_ENABLED'), False),
+            bot_token=_get_optional_str(os.getenv('TELEGRAM_BOT_TOKEN')),
+            owner_chat_id=_get_optional_int(os.getenv('TELEGRAM_OWNER_CHAT_ID')),
+            allowed_chat_ids=tuple(
+                int(chat_id.strip())
+                for chat_id in os.getenv('TELEGRAM_ALLOWED_CHAT_IDS', '').split(',')
+                if chat_id.strip().lstrip('-').isdigit()
+            ),
+            poll_timeout_seconds=int(os.getenv('TELEGRAM_POLL_TIMEOUT_SECONDS', '25')),
+            request_timeout_seconds=float(os.getenv('TELEGRAM_REQUEST_TIMEOUT_SECONDS', '40')),
+            history_messages=int(os.getenv('TELEGRAM_HISTORY_MESSAGES', '12')),
+            max_reply_chars=int(os.getenv('TELEGRAM_MAX_REPLY_CHARS', '3500')),
+            cooldown_seconds=float(os.getenv('TELEGRAM_COOLDOWN_SECONDS', '2')),
+            guest_web_search=_get_bool(os.getenv('TELEGRAM_GUEST_WEB_SEARCH'), False),
+            proxy=_get_optional_str(os.getenv('TELEGRAM_PROXY')),
+            voice_enabled=_get_bool(os.getenv('TELEGRAM_VOICE_ENABLED'), False),
+            voice_reply_mode=os.getenv('TELEGRAM_VOICE_REPLY_MODE', 'mirror').strip().lower(),
+            voice_max_chars=int(os.getenv('TELEGRAM_VOICE_MAX_CHARS', '700')),
+            voice_max_input_seconds=int(os.getenv('TELEGRAM_VOICE_MAX_INPUT_SECONDS', '180')),
+            persist_history=_get_bool(os.getenv('TELEGRAM_PERSIST_HISTORY'), True),
+            store_path=os.getenv('TELEGRAM_STORE_PATH', 'data/telegram_chats.sqlite3'),
+            store_max_messages_per_chat=int(os.getenv('TELEGRAM_STORE_MAX_MESSAGES', '200')),
+        ),
+        system_control=SystemControlConfig(
+            enabled=_get_bool(os.getenv('SYSTEM_CONTROL_ENABLED'), False),
+        ),
+        ide=IdeConfig(
+            enabled=_get_bool(os.getenv('IDE_ENABLED'), False),
+            editor=os.getenv('IDE_EDITOR', 'auto').strip().lower(),
+            project_root=os.getenv('IDE_PROJECT_ROOT', os.getenv('CODE_TOOLS_PROJECT_ROOT', '.')),
+            test_timeout_seconds=int(os.getenv('IDE_TEST_TIMEOUT_SECONDS', '300')),
+        ),
+        shell=ShellConfig(
+            enabled=_get_bool(os.getenv('SHELL_COMMANDS_ENABLED'), False),
+            working_dir=os.getenv('SHELL_WORKING_DIR', '.'),
+            timeout_seconds=int(os.getenv('SHELL_TIMEOUT_SECONDS', '60')),
+        ),
+        hotkeys=HotkeysConfig(
+            enabled=_get_bool(os.getenv('HOTKEYS_ENABLED'), False),
+            summon=os.getenv('HOTKEY_SUMMON', 'ctrl+shift+h').strip().lower(),
+            dictation=os.getenv('HOTKEY_DICTATION', 'ctrl+shift+d').strip().lower(),
+            voice_toggle=os.getenv('HOTKEY_VOICE_TOGGLE', 'ctrl+shift+v').strip().lower(),
+            ask_selection=os.getenv('HOTKEY_ASK_SELECTION', 'ctrl+shift+a').strip().lower(),
+        ),
+        people=PeopleConfig(
+            enabled=_get_bool(os.getenv('PEOPLE_ENABLED'), False),
+            directory=os.getenv('PEOPLE_DIR', 'data/people'),
+            impression_every_turns=int(os.getenv('PEOPLE_IMPRESSION_EVERY_TURNS', '6')),
+        ),
+        vision=VisionConfig(
+            enabled=_get_bool(os.getenv('VISION_ENABLED'), False),
+            model=os.getenv('VISION_MODEL', 'qwen2.5vl:3b'),
+            host=os.getenv('VISION_HOST', os.getenv('OLLAMA_HOST', 'http://127.0.0.1:11434')),
+            timeout_seconds=float(os.getenv('VISION_TIMEOUT_SECONDS', '180')),
+            monitor_index=int(os.getenv('VISION_MONITOR_INDEX', '1')),
         ),
         wakeword=WakeWordConfig(
             enabled=_get_bool(os.getenv('WAKEWORD_ENABLED'), False),

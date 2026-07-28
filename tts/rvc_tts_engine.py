@@ -1,6 +1,7 @@
 import atexit
 import json
 import logging
+import os
 import queue
 import subprocess
 import tempfile
@@ -62,14 +63,18 @@ class PersistentApplioRVCWorker:
             '--applio-root',
             str(self.applio_root),
         ]
+        # Без CREATE_NO_WINDOW воркер открывает собственное консольное окно,
+        # когда родитель запущен без консоли (pythonw в графическом режиме).
+        creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=None,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding='utf-8',
             bufsize=1,
+            creationflags=creation_flags,
         )
         self._reader_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader_thread.start()
@@ -286,7 +291,24 @@ class RvcTTSEngine:
             self._get_silero_model()
         if self.backend in {'persistent', 'worker'}:
             self._get_worker().preload(model_path=self.model_path, embedder_model='contentvec')
+        self._warm_up_conversion()
         logger.info('RVC TTS warm-up completed in %.1fs.', time.perf_counter() - started_at)
+
+    def _warm_up_conversion(self) -> None:
+        """Прогоняет одну фразу через весь тракт вхолостую.
+
+        Без этого f0-модель (rmvpe) грузится лениво на первой реальной реплике,
+        и та занимает ~5s вместо ~1.5s.
+        """
+        try:
+            with tempfile.TemporaryDirectory(prefix='herta_rvc_warmup_') as temp_dir:
+                temp_path = Path(temp_dir)
+                base_wav = temp_path / 'warmup_base.wav'
+                rvc_wav = temp_path / 'warmup_rvc.wav'
+                self._synthesize_base_voice('Прогрев.', base_wav)
+                self._run_rvc(input_path=base_wav, output_path=rvc_wav)
+        except Exception as exc:
+            logger.warning('RVC warm-up conversion failed, first reply may be slower: %s', exc)
 
     def _run_rvc(self, *, input_path: Path, output_path: Path) -> None:
         self._log_missing_index_once()
@@ -319,6 +341,29 @@ class RvcTTSEngine:
             return
 
         raise ValueError("Unsupported RVC_BACKEND. Use 'persistent' or 'subprocess'.")
+
+    def synthesize_to_file(self, text: str, output_path: Path) -> Path:
+        """Синтезирует реплику голосом Герты в файл, ничего не проигрывая.
+
+        Нужно там, где звук уходит не в колонки: голосовые сообщения Telegram и т.п.
+        """
+        normalized_text = text.strip()
+        if not normalized_text:
+            raise ValueError('Нечего синтезировать: пустой текст.')
+
+        if not self.applio_python.exists():
+            raise FileNotFoundError(f'Applio Python was not found: {self.applio_python}')
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        started_at = time.perf_counter()
+
+        with tempfile.TemporaryDirectory(prefix='herta_rvc_file_') as temp_dir:
+            base_wav = Path(temp_dir) / 'base.wav'
+            self._synthesize_base_voice(normalized_text, base_wav)
+            self._run_rvc(input_path=base_wav, output_path=output_path)
+
+        logger.info('RVC synth to file completed in %.1fs -> %s', time.perf_counter() - started_at, output_path)
+        return output_path
 
     def speak(self, text: str) -> None:
         normalized_text = text.strip()

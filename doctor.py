@@ -72,6 +72,9 @@ def run_doctor(config: AppConfig) -> int:
     _check_long_memory(report, config)
     _check_code_tools(report, config)
     _check_web_search(report, config)
+    _check_telegram(report, config)
+    _check_vision(report, config)
+    _check_ide(report, config)
     _check_wakeword(report, config)
     _check_system_actions(report, config)
     _check_rvc(report, config)
@@ -303,6 +306,88 @@ def _check_web_search(report: DoctorReport, config: AppConfig) -> None:
         'Web search',
         f"provider={config.web_search.provider}, max_results={config.web_search.max_results}, mode={followup}.",
     )
+
+
+def _check_telegram(report: DoctorReport, config: AppConfig) -> None:
+    if not config.telegram.enabled:
+        report.warn('Telegram bridge', 'disabled.')
+        return
+
+    if not config.telegram.bot_token:
+        report.fail('Telegram bridge', 'TELEGRAM_BOT_TOKEN is not configured.')
+        return
+
+    if config.telegram.owner_chat_id is None:
+        report.warn(
+            'Telegram owner',
+            'TELEGRAM_OWNER_CHAT_ID is empty; nobody gets memory/web-search access. Send /whoami to the bot.',
+        )
+    else:
+        report.ok('Telegram owner', f'chat id {config.telegram.owner_chat_id}')
+
+    scope = (
+        f'restricted to {len(config.telegram.allowed_chat_ids)} chat(s)'
+        if config.telegram.allowed_chat_ids
+        else 'open to anyone who finds the bot'
+    )
+    guests = 'with web search' if config.telegram.guest_web_search else 'chat only'
+    report.ok('Telegram bridge', f'{scope}; guests: {guests}.')
+
+    if config.telegram.proxy and not _module_exists('socksio'):
+        report.fail('Telegram proxy', "TELEGRAM_PROXY is set but 'socksio' is missing. Run: pip install socksio")
+
+
+def _check_vision(report: DoctorReport, config: AppConfig) -> None:
+    if not config.vision.enabled:
+        report.warn('Vision', 'disabled; photos and screen questions are unavailable.')
+        return
+
+    for module in ('PIL', 'mss'):
+        if not _module_exists(module):
+            report.fail(f'Vision package {module}', f"module is missing. Run: python -m pip install {'pillow' if module == 'PIL' else module}")
+
+    try:
+        import httpx
+
+        response = httpx.get(f'{config.vision.host}/api/tags', timeout=5)
+        response.raise_for_status()
+        installed = {model.get('name', '') for model in response.json().get('models', [])}
+    except Exception as exc:
+        report.warn('Vision model', f'could not reach Ollama at {config.vision.host}: {exc}')
+        return
+
+    if config.vision.model in installed:
+        report.ok('Vision model', f'{config.vision.model} is installed.')
+    else:
+        report.fail(
+            'Vision model',
+            f"{config.vision.model} is not in Ollama. Run: ollama pull {config.vision.model}",
+        )
+
+
+def _check_ide(report: DoctorReport, config: AppConfig) -> None:
+    if not config.ide.enabled:
+        report.warn('IDE integration', 'disabled; file opening and error navigation unavailable.')
+        return
+
+    from desktop.ide import resolve_editor
+
+    editor = resolve_editor(config.ide.editor)
+    if editor is None:
+        report.fail('IDE editor', 'neither VS Code nor IntelliJ found in PATH.')
+    else:
+        report.ok('IDE editor', f'{editor.name} — {editor.command}')
+
+    root = Path(config.ide.project_root).resolve()
+    if root.is_dir():
+        report.ok('IDE project root', str(root))
+    else:
+        report.fail('IDE project root', f'not a directory: {root}')
+
+    if _module_exists('pytest'):
+        report.ok('pytest', 'importable.')
+    else:
+        report.warn('pytest', "module is missing; 'прогони тесты' will fail. Run: python -m pip install pytest")
 
 
 def _check_wakeword(report: DoctorReport, config: AppConfig) -> None:

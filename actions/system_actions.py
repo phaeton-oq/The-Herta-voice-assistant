@@ -91,7 +91,63 @@ LINT_TRIGGERS = (
     'проверь стиль',
     'проверь линтером',
 )
-CODE_TARGET_PREPOSITIONS = ('в файле ', 'в модуле ', 'файл ', 'файла ', 'на файл ', 'на ', 'в ', 'для ')
+CODE_TARGET_PREPOSITIONS = (
+    'в файле ', 'в модуле ', 'по файлу ', 'по модулю ',
+    'файл ', 'файла ', 'на файл ', 'по ', 'на ', 'в ', 'для ',
+)
+# Слова, которые встречаются рядом с целью, но целью не являются.
+TARGET_STOP_WORDS = frozenset({
+    'по', 'в', 'на', 'для', 'файл', 'файлу', 'файле', 'файла',
+    'модуль', 'модулю', 'модуле', 'проект', 'проекту', 'коде', 'код',
+})
+VOLUME_UP_TRIGGERS = ('сделай громче', 'громче', 'прибавь звук', 'прибавь громкость', 'увеличь громкость')
+VOLUME_DOWN_TRIGGERS = ('сделай тише', 'тише', 'убавь звук', 'убавь громкость', 'уменьши громкость')
+MUTE_TRIGGERS = ('выключи звук', 'заглуши', 'без звука', 'мьют')
+UNMUTE_TRIGGERS = ('включи звук', 'верни звук', 'вруби звук')
+MEDIA_TRIGGERS = {
+    'pause': ('поставь на паузу', 'на паузу', 'останови музыку', 'пауза'),
+    'play': ('продолжи музыку', 'включи музыку', 'вруби музыку'),
+    'next': ('следующий трек', 'переключи трек', 'дальше трек', 'следующая песня'),
+    'previous': ('предыдущий трек', 'предыдущая песня', 'верни трек'),
+}
+CLIPBOARD_READ_TRIGGERS = ('что у меня в буфере', 'что в буфере', 'прочитай буфер', 'покажи буфер')
+WINDOW_LIST_TRIGGERS = ('какие окна открыты', 'покажи окна', 'список окон', 'что открыто')
+MINIMIZE_TRIGGERS = ('сверни всё', 'сверни все', 'сверни все окна', 'покажи рабочий стол')
+FOCUS_TRIGGERS = ('переключись на', 'переключи на', 'открой окно')
+FIND_FILE_TRIGGERS = ('найди файл', 'найди файлы', 'где файл', 'поищи файл')
+SHELL_TRIGGERS = ('выполни команду', 'запусти команду', 'выполни в терминале', 'прогони команду')
+RUN_TESTS_TRIGGERS = ('прогони тесты', 'запусти тесты', 'прогони тест', 'проверь тесты', 'pytest')
+GOTO_ERROR_TRIGGERS = (
+    'открой первую ошибку',
+    'открой ошибку',
+    'перейди к ошибке',
+    'покажи ошибку в коде',
+    'прыгни к ошибке',
+)
+NEXT_ERROR_TRIGGERS = ('следующая ошибка', 'открой следующую ошибку', 'дальше ошибка')
+LIST_PROBLEMS_TRIGGERS = ('какие ошибки', 'покажи ошибки', 'список ошибок', 'что нашла в коде')
+OPEN_FILE_TRIGGERS = ('открой в редакторе', 'открой файл в коде', 'покажи файл', 'открой исходник')
+ERROR_VERBS = ('открой', 'перейди', 'прыгни', 'покажи', 'переключись на ошибк')
+# Как собеседник может назвать находку анализатора.
+PROBLEM_WORDS = ('ошибк', 'находк', 'замечани', 'проблем')
+ERROR_INDEX_WORDS = {
+    'перв': 1, 'втор': 2, 'трет': 3, 'четвёрт': 4, 'четверт': 4, 'пят': 5,
+}
+GIT_STATUS_TRIGGERS = ('покажи git status', 'что в гите', 'статус гита', 'git status')
+ALLOWED_COMMANDS_TRIGGERS = ('какие команды тебе разрешены', 'что тебе можно выполнять', 'покажи белый список')
+
+SCREEN_TRIGGERS = (
+    'что у меня на экране',
+    'что на экране',
+    'посмотри на экран',
+    'посмотри на мой экран',
+    'глянь на экран',
+    'взгляни на экран',
+    'что ты видишь на экране',
+    'опиши экран',
+    'сделай скриншот',
+    'смотри на экран',
+)
 
 SITE_ALIASES: dict[str, str] = {
     'ютуб': 'https://www.youtube.com',
@@ -150,9 +206,13 @@ class SystemActionRunner:
         logger: logging.Logger | None = None,
         *,
         extra_tools: list[CallableTool] | None = None,
+        on_tool_executed=None,
     ) -> None:
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
+        # Наблюдатель за вызовами инструментов: нужен ленте активности в интерфейсе.
+        # Вызывается из того же потока, что и сам инструмент.
+        self._on_tool_executed = on_tool_executed
         self.root_dir = _resolve_managed_root(config.document_dir)
         self.registry_path = _resolve_registry_path(config.registry_path)
         self._extra_tools: list[CallableTool] = list(extra_tools or [])
@@ -160,6 +220,32 @@ class SystemActionRunner:
         # their own enable flags and must not be gated by SYSTEM_ACTIONS_ENABLED.
         self._extra_tool_names: frozenset[str] = frozenset(tool.spec.name for tool in self._extra_tools)
         self.tools = self._build_tool_registry()
+
+    def detect_plan(self, user_text: str) -> list[ToolCall]:
+        """Разбирает многошаговую просьбу в последовательность действий.
+
+        Раньше из сообщения брался ровно один триггер, причём по приоритету
+        проверок, а не по порядку в тексте: список из пяти пунктов сводился
+        к последнему «запомни». Теперь каждый пункт разбирается отдельно.
+        """
+        segments = _split_into_steps(user_text)
+        if len(segments) < 2:
+            return []
+
+        plan: list[ToolCall] = []
+        for segment in segments:
+            normalized = _normalize(segment)
+            if not normalized:
+                continue
+            call = self._detect_tool_call(segment, normalized)
+            if call is None:
+                continue
+            # Один и тот же шаг, продублированный в тексте, выполнять дважды незачем.
+            if plan and plan[-1].name == call.name and plan[-1].arguments == call.arguments:
+                continue
+            plan.append(call)
+
+        return plan if len(plan) > 1 else []
 
     def handle(self, user_text: str) -> SystemActionResult | None:
         normalized = _normalize(user_text)
@@ -205,14 +291,28 @@ class SystemActionRunner:
             )
 
         try:
-            return self.tools.run(tool_call)
+            result = self.tools.run(tool_call)
         except Exception as exc:
             self.logger.warning("System action failed: %s", exc)
+            self._notify_tool(tool_call.name, str(exc), executed=False)
             return SystemActionResult(
                 action_name='system_action_failed',
                 message=f'Не вышло выполнить системное действие: {exc}',
                 executed=False,
             )
+
+        self._notify_tool(result.action_name, result.message, executed=result.executed)
+        return result
+
+    def _notify_tool(self, name: str, message: str, *, executed: bool) -> None:
+        """Сообщает наблюдателю о вызове инструмента. Сбой наблюдателя не должен ломать действие."""
+        if self._on_tool_executed is None:
+            return
+        try:
+            detail = ' '.join(message.split())[:70]
+            self._on_tool_executed(name, detail, 'ok' if executed else 'error')
+        except Exception as exc:
+            self.logger.debug('Наблюдатель инструментов упал: %s', exc)
 
     def tool_specs(self) -> list[ToolSpec]:
         return self.tools.specs
@@ -348,6 +448,21 @@ class SystemActionRunner:
         if code_call is not None:
             return code_call
 
+        ide_call = _detect_ide_call(original_text, normalized)
+        if ide_call is not None:
+            return ide_call
+
+        shell_call = _detect_shell_call(original_text, normalized)
+        if shell_call is not None:
+            return shell_call
+
+        control_call = _detect_system_control_call(original_text, normalized)
+        if control_call is not None:
+            return control_call
+
+        if _has_any(normalized, SCREEN_TRIGGERS):
+            return ToolCall('look_at_screen', {'question': original_text.strip()})
+
         search_call = _detect_web_search_call(original_text, normalized)
         if search_call is not None:
             return search_call
@@ -366,6 +481,10 @@ class SystemActionRunner:
             shortcut_url = _site_alias_url(normalized)
             if shortcut_url is not None:
                 return ToolCall('open_url', {'url': shortcut_url})
+
+            app_name = _known_app_name(original_text, normalized)
+            if app_name is not None:
+                return ToolCall('launch_app', {'name': app_name})
 
             search_target = _strip_leading_trigger(original_text, normalized, OPEN_WORDS)
             if search_target:
@@ -764,6 +883,23 @@ def build_system_actions_instruction(*, structured_tools_available: bool = True)
         'or pseudo-XML. The user\'s Russian phrasing ("открой ютуб", "создай папку Х", "запомни Y", "проверь типы в Z") is '
         'parsed locally and executed automatically. Just answer in character; the parser handles the action.'
     )
+
+
+STEP_SPLIT_RE = re.compile(r'(?m)^\s*(?:\d+[.)]\s*|[-*•]\s+)')
+
+
+def _split_into_steps(text: str) -> list[str]:
+    """Режет сообщение на шаги: нумерованный список, маркеры или строки."""
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    if STEP_SPLIT_RE.search(stripped):
+        parts = [part.strip() for part in STEP_SPLIT_RE.split(stripped)]
+    else:
+        parts = [part.strip() for part in stripped.split('\n')]
+
+    return [part for part in parts if part]
 
 
 def _normalize(text: str) -> str:
@@ -1212,6 +1348,114 @@ def _strip_memory_modifiers(text: str) -> str:
     return text
 
 
+def _detect_ide_call(original_text: str, normalized: str) -> ToolCall | None:
+    """Команды редактора: тесты, переход к ошибке, открытие файла."""
+    if _has_any(normalized, RUN_TESTS_TRIGGERS):
+        target = _strip_leading_trigger(original_text, normalized, RUN_TESTS_TRIGGERS) or ''
+        cleaned = target.strip(' ,.;:!?\'"`').strip()
+        # «прогони тесты для actions» -> цель, «прогони тесты» -> весь проект
+        if cleaned.startswith(('для ', 'в ', 'по ')):
+            cleaned = cleaned.split(' ', 1)[1] if ' ' in cleaned else ''
+        return ToolCall('run_tests', {'target': cleaned if _looks_like_path(cleaned) else ''})
+
+    if _has_any(normalized, LIST_PROBLEMS_TRIGGERS):
+        return ToolCall('list_problems', {})
+
+    if _has_any(normalized, NEXT_ERROR_TRIGGERS):
+        return ToolCall('goto_error', {'index': 2})
+
+    # «открой вторую ошибку», «открой первую находку», «перейди к замечанию 3» —
+    # глагол и предмет могут стоять не подряд, поэтому точные фразы дополняем
+    # общим правилом с синонимами.
+    mentions_problem = _has_any(normalized, PROBLEM_WORDS)
+    if mentions_problem and (_has_any(normalized, GOTO_ERROR_TRIGGERS) or _has_any(normalized, ERROR_VERBS)):
+        return ToolCall('goto_error', {'index': _error_index(normalized)})
+
+    payload = _strip_leading_trigger(original_text, normalized, OPEN_FILE_TRIGGERS)
+    if payload:
+        cleaned = payload.strip(' ,.;:!?\'"`').strip()
+        if cleaned:
+            first = cleaned.split()[0]
+            return ToolCall('open_in_editor', {'path': first})
+
+    return None
+
+
+def _error_index(normalized: str) -> int:
+    """Достаёт номер ошибки: «вторую» или «ошибку 3». По умолчанию первая."""
+    for stem, number in ERROR_INDEX_WORDS.items():
+        if stem in normalized:
+            return number
+
+    match = re.search(r'(?:ошибк|находк|замечани|проблем)\w*\s+(\d+)', normalized)
+    if match:
+        return max(1, int(match.group(1)))
+    return 1
+
+
+def _looks_like_path(value: str) -> bool:
+    """Отличает цель тестов от случайных слов."""
+    if not value or ' ' in value.strip():
+        return False
+    return '.' in value or '/' in value or '\\' in value or value.isidentifier()
+
+
+def _detect_shell_call(original_text: str, normalized: str) -> ToolCall | None:
+    """Команды терминала. Выполнение всё равно потребует подтверждения."""
+    if _has_any(normalized, ALLOWED_COMMANDS_TRIGGERS):
+        return ToolCall('list_allowed_commands', {})
+
+    if _has_any(normalized, GIT_STATUS_TRIGGERS):
+        return ToolCall('run_command', {'command': 'git status', 'reason': 'посмотреть состояние репозитория'})
+
+    payload = _strip_leading_trigger(original_text, normalized, SHELL_TRIGGERS)
+    if payload:
+        cleaned = payload.strip(' ,.;:!?\'"`').strip()
+        if cleaned:
+            return ToolCall('run_command', {'command': cleaned, 'reason': 'просьба пользователя'})
+
+    return None
+
+
+def _detect_system_control_call(original_text: str, normalized: str) -> ToolCall | None:
+    """Громкость, медиа, буфер, окна и поиск файлов."""
+    if _has_any(normalized, MUTE_TRIGGERS):
+        return ToolCall('set_volume', {'mute': True})
+    if _has_any(normalized, UNMUTE_TRIGGERS):
+        return ToolCall('set_volume', {'mute': False})
+    if _has_any(normalized, VOLUME_UP_TRIGGERS):
+        return ToolCall('set_volume', {'delta': 15})
+    if _has_any(normalized, VOLUME_DOWN_TRIGGERS):
+        return ToolCall('set_volume', {'delta': -15})
+
+    for action, triggers in MEDIA_TRIGGERS.items():
+        if _has_any(normalized, triggers):
+            return ToolCall('media_control', {'action': action})
+
+    if _has_any(normalized, CLIPBOARD_READ_TRIGGERS):
+        return ToolCall('read_clipboard', {})
+    if _has_any(normalized, MINIMIZE_TRIGGERS):
+        return ToolCall('minimize_all', {})
+    if _has_any(normalized, WINDOW_LIST_TRIGGERS):
+        return ToolCall('list_windows', {})
+
+    file_query = _strip_leading_trigger(original_text, normalized, FIND_FILE_TRIGGERS)
+    if file_query is not None:
+        cleaned = file_query.strip(' ,.;:!?\'"`').strip()
+        if cleaned:
+            return ToolCall('find_files', {'query': cleaned})
+
+    focus_query = _strip_leading_trigger(original_text, normalized, FOCUS_TRIGGERS)
+    if focus_query is not None:
+        # "переключись на X" всегда про окна: с сайтами это не конфликтует,
+        # для них есть отдельное "открой X".
+        cleaned = focus_query.strip(' ,.;:!?\'"`').strip()
+        if cleaned:
+            return ToolCall('focus_window', {'query': cleaned})
+
+    return None
+
+
 def _detect_web_search_call(original_text: str, normalized: str) -> ToolCall | None:
     # Реплика, которая явно про локальные файлы или папки — не наш кейс.
     has_filesystem_context = _mentions_text_document(normalized) or _mentions_folder(normalized)
@@ -1259,6 +1503,27 @@ def _build_search_query(
     return cleaned
 
 
+def _known_app_name(original_text: str, normalized: str) -> str | None:
+    """Ищет в реплике имя установленной программы для 'открой X'."""
+    try:
+        from desktop.system_control import APP_ALIASES
+    except ImportError:
+        return None
+
+    # Длинные имена проверяем первыми: 'vs code' важнее, чем 'код'.
+    for alias in sorted(APP_ALIASES, key=len, reverse=True):
+        if re.search(r'\b' + re.escape(alias) + r'\b', normalized):
+            return alias
+
+    payload = _strip_leading_trigger(original_text, normalized, OPEN_WORDS)
+    if payload:
+        candidate = payload.strip(' ,.;:!?\'"`').split()
+        # Одно слово латиницей - похоже на имя программы, пробуем запустить.
+        if len(candidate) == 1 and candidate[0].isascii() and candidate[0].isalpha():
+            return candidate[0]
+    return None
+
+
 def _site_alias_url(normalized: str) -> str | None:
     tokens = re.findall(r'[\w-]+', normalized, flags=re.UNICODE)
     for token in tokens:
@@ -1291,6 +1556,13 @@ def _extract_code_target(original_text: str, normalized: str, triggers: tuple[st
     if not cleaned:
         return None
 
+    # Сначала ищем то, что выглядит путём: «прогони ruff по файлу main.py»
+    # раньше давало цель «по», потому что бралось первое слово подряд.
+    for word in cleaned.split():
+        candidate = word.strip(' ,.;:!?\'"`()')
+        if _looks_like_code_target(candidate):
+            return candidate
+
     lowered = cleaned.lower()
     for preposition in CODE_TARGET_PREPOSITIONS:
         if lowered.startswith(preposition):
@@ -1300,6 +1572,15 @@ def _extract_code_target(original_text: str, normalized: str, triggers: tuple[st
     candidate = cleaned.split()[0] if cleaned else ''
     candidate = candidate.strip(' ,.;:!?\'"`')
     return candidate or None
+
+
+def _looks_like_code_target(word: str) -> bool:
+    """Похоже ли слово на файл или каталог проекта."""
+    if not word or word.lower() in TARGET_STOP_WORDS:
+        return False
+    if word in ('.', './'):
+        return True
+    return bool(re.search(r'\.(py|pyi|txt|md|json|toml|cfg|ini)$', word, re.IGNORECASE)) or '/' in word or '\\' in word
 
 
 def _guess_memory_category(content: str) -> str:
