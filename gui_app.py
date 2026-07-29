@@ -83,6 +83,10 @@ class HertaApp(QObject):
     потоке. Для QPixmap (иконка трея) это заканчивается падением процесса.
     """
 
+    # Прогрев провайдера идёт в обычном потоке, поэтому результат возвращается
+    # сигналом: трогать виджеты откуда угодно, кроме основного потока, нельзя.
+    warmup_finished = Signal(bool, str)
+
     def __init__(self) -> None:
         super().__init__()
         self.config: AppConfig = load_config()
@@ -93,6 +97,8 @@ class HertaApp(QObject):
         self.window.stop_voice_requested.connect(self.stop_voice)
         self.window.send_text_requested.connect(self.send_text)
         self.window.hidden_to_tray.connect(self._on_hidden_to_tray)
+        self.window.settings_requested.connect(self.open_settings)
+        self.warmup_finished.connect(self._on_warmup_finished)
 
         self.tray: HertaTray | None = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -114,6 +120,7 @@ class HertaApp(QObject):
         self._init_worker: InitWorker | None = None
         self._hotkeys: GlobalHotkeys | None = None
         self._dictation: DictationRecorder | None = None
+        self._settings_dialog = None
         self._speech_enabled = True
 
         # Быстрая инициализация — UI блокировок не даёт.
@@ -215,50 +222,33 @@ class HertaApp(QObject):
         self.chat_client = _build_chat_client(self.config)
         self.tts_engine = _build_tts_engine(self.config, no_tts=False, live_voice=False)
 
-        # --- Bootstrap messages ---
-        selected_model = _selected_model_name(self.config)
-        long_memory_block = (
-            self.long_memory_store.format_for_prompt() if self.long_memory_store is not None else ''
-        )
-        self.messages = build_bootstrap_messages(
-            selected_model,
-            long_memory_block=long_memory_block or None,
-            is_owner=True,
-        )
-        if self.config.system_actions.enabled:
-            provider_supports_tools = self.config.llm_provider in GOOGLE_AI_PROVIDER_NAMES
-            self.messages.append(
-                {
-                    'role': 'system',
-                    'content': build_system_actions_instruction(
-                        structured_tools_available=provider_supports_tools,
-                    ),
-                }
-            )
         # --- Профиль собеседника ---
-        # Блок добавляется до подсчёта locked_prefix_count и до загрузки истории:
-        # иначе он окажется в хвосте диалога и будет вытеснен вместе со старыми репликами.
+        # Готовится до сборки префикса: блок с мнением входит в него и обязан
+        # попасть под locked_prefix_count, иначе окажется в хвосте диалога и
+        # будет вытеснен вместе со старыми репликами.
+        self.people_store = None
         self.impression_maker = None
         if self.config.people.enabled:
             from brain.impressions import ImpressionMaker
             from brain.people import PeopleStore
 
-            people_store = PeopleStore(self.config.people.directory)
+            self.people_store = PeopleStore(self.config.people.directory)
             self.impression_maker = ImpressionMaker(
-                people_store,
+                self.people_store,
                 self.chat_client,
                 every_turns=self.config.people.impression_every_turns,
             )
-            owner_profile = people_store.load(OWNER_PERSON_ID, 'владелец')
-            profile_block = owner_profile.format_for_prompt()
-            if profile_block:
-                self.messages.append({'role': 'system', 'content': profile_block})
+
+        # --- Bootstrap messages ---
+        self.messages = self._build_prefix()
+        self.locked_prefix_count = len(self.messages)
+
+        if self.people_store is not None:
+            owner_profile = self.people_store.load(OWNER_PERSON_ID, 'владелец')
             if owner_profile.impression:
                 self.window.add_system_message(
                     f'Мнение о тебе за {owner_profile.turns} обращений: {owner_profile.impression[0]}'
                 )
-
-        self.locked_prefix_count = len(self.messages)
 
         # --- Dialogue memory ---
         self.dialogue_memory: DialogueMemory | None = None
@@ -280,7 +270,7 @@ class HertaApp(QObject):
                 interval_turns=self.config.long_memory.auto_extract_every_turns,
             )
 
-        self._fill_status_panel(selected_model)
+        self._fill_status_panel(_selected_model_name(self.config))
 
     def _fill_status_panel(self, selected_model: str) -> None:
         """Заполняет левую панель тем, что реально включено."""
@@ -471,6 +461,171 @@ class HertaApp(QObject):
             self._text_thread.wait(2000)
         self._text_thread = None
         self._text_worker = None
+
+    # ---------- Режим работы: провайдер и модель ----------
+
+    def _build_prefix(self) -> list[dict[str, str]]:
+        """Собирает системный префикс диалога под текущего провайдера.
+
+        Вынесено в отдельный метод, потому что при смене провайдера префикс
+        приходится пересобирать целиком: и persona-слой зависит от имени
+        модели, и инструкция об инструментах — от того, умеет ли провайдер
+        structured tool calling. Подменить один только клиент нельзя.
+        """
+        long_memory_block = (
+            self.long_memory_store.format_for_prompt() if self.long_memory_store is not None else ''
+        )
+        prefix = build_bootstrap_messages(
+            _selected_model_name(self.config),
+            long_memory_block=long_memory_block or None,
+            is_owner=True,
+        )
+        if self.config.system_actions.enabled:
+            # Cerebras и Ollama structured tools не умеют. Если не сказать им
+            # об этом прямо, модель начинает печатать JSON вызова прямо в текст
+            # ответа — этот баг мы уже ловили.
+            provider_supports_tools = self.config.llm_provider in GOOGLE_AI_PROVIDER_NAMES
+            prefix.append(
+                {
+                    'role': 'system',
+                    'content': build_system_actions_instruction(
+                        structured_tools_available=provider_supports_tools,
+                    ),
+                }
+            )
+        if self.people_store is not None:
+            owner_profile = self.people_store.load(OWNER_PERSON_ID, 'владелец')
+            profile_block = owner_profile.format_for_prompt()
+            if profile_block:
+                prefix.append({'role': 'system', 'content': profile_block})
+        return prefix
+
+    def current_models(self) -> dict[str, str]:
+        """Модель, выбранная для каждого провайдера. Нужно окну настроек."""
+        return {
+            'ollama': self.config.ollama.model,
+            'cerebras': self.config.cerebras.model,
+            'deepseek': self.config.deepseek.model,
+            'google_ai': self.config.google_ai.model,
+        }
+
+    def _set_model_for(self, provider: str, model: str) -> None:
+        if not model:
+            return
+        if provider == 'ollama':
+            self.config.ollama.model = model
+        elif provider == 'cerebras':
+            self.config.cerebras.model = model
+        elif provider == 'deepseek':
+            self.config.deepseek.model = model
+        elif provider in GOOGLE_AI_PROVIDER_NAMES:
+            self.config.google_ai.model = model
+
+    @Slot()
+    def open_settings(self) -> None:
+        from gui.settings import SettingsDialog
+
+        dialog = SettingsDialog(
+            self.window, provider=self.config.llm_provider, models=self.current_models()
+        )
+        dialog.provider_apply_requested.connect(self.apply_provider)
+        dialog.keys_changed.connect(self._on_keys_changed)
+        self._settings_dialog = dialog
+        dialog.exec()
+        self._settings_dialog = None
+
+    @Slot()
+    def _on_keys_changed(self) -> None:
+        """Ключ сохранили или удалили — перечитываем конфиг и пересобираем клиента.
+
+        Без этого новый ключ подхватился бы только после перезапуска: клиент
+        держит своё значение с момента создания.
+        """
+        self.config = load_config()
+        self.apply_provider(self.config.llm_provider, '')
+
+    @Slot(str, str)
+    def apply_provider(self, provider: str, model: str) -> None:
+        """Переключает провайдера без перезапуска и без потери диалога."""
+        if self._text_thread is not None or self._voice_worker is not None:
+            self.window.add_system_message('Сначала дождись ответа — переключу после.')
+            return
+
+        previous_provider = self.config.llm_provider
+        previous_model = _selected_model_name(self.config)
+
+        self.config.llm_provider = provider
+        self._set_model_for(provider, model)
+
+        try:
+            new_client = _build_chat_client(self.config)
+        except Exception as exc:
+            self.config.llm_provider = previous_provider
+            self.window.add_system_message(f'Не вышло переключиться: {exc}')
+            return
+
+        # Уходим с локальной модели — просим Ollama выгрузить её из видеопамяти.
+        # На 6 ГБ она иначе продолжает занимать место рядом с Whisper и RVC.
+        if previous_provider == 'ollama' and provider != 'ollama':
+            self._unload_ollama()
+
+        self.chat_client = new_client
+        if self.impression_maker is not None:
+            self.impression_maker.chat_client = new_client
+
+        # Префикс пересобираем, хвост диалога сохраняем: человек не должен
+        # терять беседу из-за смены режима.
+        tail = self.messages[self.locked_prefix_count:]
+        self.messages[:] = self._build_prefix() + tail
+        self.locked_prefix_count = len(self.messages) - len(tail)
+
+        selected = _selected_model_name(self.config)
+        self.window.set_status('llm', _shorten(selected))
+        self.window.add_system_message(
+            f'Режим: {provider} / {selected}. Прогреваю…'
+            if selected != previous_model
+            else f'Режим: {provider}. Прогреваю…'
+        )
+        self._warm_up_client()
+
+    def _unload_ollama(self) -> None:
+        """Просит Ollama немедленно выгрузить модель (keep_alive=0)."""
+        def worker() -> None:
+            try:
+                import httpx
+
+                httpx.post(
+                    f'{self.config.ollama.host.rstrip("/")}/api/generate',
+                    json={'model': self.config.ollama.model, 'keep_alive': 0},
+                    timeout=10.0,
+                )
+            except Exception as exc:
+                logger.debug('Выгрузить модель Ollama не вышло: %s', exc)
+
+        threading.Thread(target=worker, name='ollama-unload', daemon=True).start()
+
+    def _warm_up_client(self) -> None:
+        """Прогрев нового клиента в фоне: в основном потоке он подвесил бы окно."""
+        client = self.chat_client
+
+        def worker() -> None:
+            try:
+                ok = client.warm_up()
+                error = getattr(client, 'last_warmup_error', None)
+            except Exception as exc:
+                ok, error = False, str(exc)
+            self.warmup_finished.emit(bool(ok), str(error or ''))
+
+        threading.Thread(target=worker, name='warmup', daemon=True).start()
+
+    @Slot(bool, str)
+    def _on_warmup_finished(self, ok: bool, error: str) -> None:
+        if ok:
+            self.window.add_system_message('Готова.')
+            self.window.set_status('llm', _shorten(_selected_model_name(self.config)))
+        else:
+            self.window.add_system_message(f'Провайдер не отвечает: {error or "причина неизвестна"}')
+            self.window.set_status('llm', 'нет связи', 'warn')
 
     # ---------- Глобальные хоткеи и диктовка ----------
 

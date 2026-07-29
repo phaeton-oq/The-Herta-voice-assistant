@@ -23,6 +23,18 @@ def _get_optional_str(value: str | None) -> str | None:
     return stripped or None
 
 
+def _secret(*env_names: str) -> str | None:
+    """Ключ из системного хранилища, а если там пусто — из окружения.
+
+    Отдельная функция, потому что ключи теперь можно задавать прямо в окне
+    настроек, и они не обязаны лежать в `.env`. Подробности о порядке
+    поиска — в utils/key_store.
+    """
+    from utils import key_store
+
+    return key_store.resolve(*env_names)
+
+
 def _get_optional_int(value: str | None) -> int | None:
     parsed = _get_optional_str(value)
     return int(parsed) if parsed is not None else None
@@ -434,7 +446,7 @@ def load_config() -> AppConfig:
             num_gpu=_get_optional_int(os.getenv('OLLAMA_NUM_GPU')),
         ),
         deepseek=DeepSeekConfig(
-            api_key=_get_optional_str(os.getenv('DEEPSEEK_API_KEY')),
+            api_key=_secret('DEEPSEEK_API_KEY'),
             base_url=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
             model=os.getenv('DEEPSEEK_MODEL', 'deepseek-v4-flash'),
             timeout_seconds=float(os.getenv('DEEPSEEK_TIMEOUT_SECONDS', '120')),
@@ -444,7 +456,7 @@ def load_config() -> AppConfig:
             rate_limit_retries=int(os.getenv('DEEPSEEK_RATE_LIMIT_RETRIES', '2')),
         ),
         cerebras=CerebrasConfig(
-            api_key=_get_optional_str(os.getenv('CEREBRAS_API_KEY')),
+            api_key=_secret('CEREBRAS_API_KEY'),
             base_url=os.getenv('CEREBRAS_BASE_URL', 'https://api.cerebras.ai/v1'),
             model=os.getenv('CEREBRAS_MODEL', 'llama-3.3-70b'),
             timeout_seconds=float(os.getenv('CEREBRAS_TIMEOUT_SECONDS', '60')),
@@ -454,7 +466,7 @@ def load_config() -> AppConfig:
             rate_limit_retries=int(os.getenv('CEREBRAS_RATE_LIMIT_RETRIES', '2')),
         ),
         google_ai=GoogleAIConfig(
-            api_key=_get_optional_str(os.getenv('GOOGLE_AI_API_KEY')) or _get_optional_str(os.getenv('GEMINI_API_KEY')),
+            api_key=_secret('GOOGLE_AI_API_KEY', 'GEMINI_API_KEY'),
             base_url=os.getenv('GOOGLE_AI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta'),
             model=os.getenv('GOOGLE_AI_MODEL', 'gemma-3-27b-it'),
             fallback_model=_get_optional_str(os.getenv('GOOGLE_AI_FALLBACK_MODEL')),
@@ -578,7 +590,7 @@ def load_config() -> AppConfig:
         web_search=WebSearchConfig(
             enabled=_get_bool(os.getenv('WEB_SEARCH_ENABLED'), False),
             provider=os.getenv('WEB_SEARCH_PROVIDER', 'tavily').strip().lower(),
-            api_key=_get_optional_str(os.getenv('TAVILY_API_KEY') or os.getenv('WEB_SEARCH_API_KEY')),
+            api_key=_secret('TAVILY_API_KEY', 'WEB_SEARCH_API_KEY'),
             max_results=int(os.getenv('WEB_SEARCH_MAX_RESULTS', '5')),
             timeout_seconds=float(os.getenv('WEB_SEARCH_TIMEOUT_SECONDS', '15')),
             search_depth=os.getenv('WEB_SEARCH_DEPTH', 'basic').strip().lower(),
@@ -601,7 +613,7 @@ def load_config() -> AppConfig:
         ),
         telegram=TelegramConfig(
             enabled=_get_bool(os.getenv('TELEGRAM_ENABLED'), False),
-            bot_token=_get_optional_str(os.getenv('TELEGRAM_BOT_TOKEN')),
+            bot_token=_secret('TELEGRAM_BOT_TOKEN'),
             owner_chat_id=_get_optional_int(os.getenv('TELEGRAM_OWNER_CHAT_ID')),
             allowed_chat_ids=tuple(
                 int(chat_id.strip())

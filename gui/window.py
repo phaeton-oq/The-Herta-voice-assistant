@@ -44,6 +44,7 @@ class HertaMainWindow(QMainWindow):
     hidden_to_tray = Signal()
     wake_word_toggled = Signal(bool)
     speech_toggled = Signal(bool)
+    settings_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,7 +114,14 @@ class HertaMainWindow(QMainWindow):
 
         layout.addStretch()
 
-        self.meta_label = QLabel('v0.3')
+        self.settings_button = QPushButton('НАСТРОЙКИ')
+        self.settings_button.setObjectName('GhostButton')
+        self.settings_button.setFixedHeight(T.H_CONTROL_SM)
+        self.settings_button.setToolTip('Режим работы и ключи API')
+        self.settings_button.clicked.connect(self.settings_requested)
+        layout.addWidget(self.settings_button)
+
+        self.meta_label = QLabel('v0.4')
         self.meta_label.setObjectName('MetaLabel')
         layout.addWidget(self.meta_label)
         return bar

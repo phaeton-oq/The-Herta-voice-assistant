@@ -349,6 +349,20 @@ QPushButton:disabled {{
     background-color: {VIOLET_MUTED};
 }}
 
+#GhostButton {{
+    background-color: transparent;
+    border: 1px solid {LINE};
+    color: {TEXT_DIM};
+    font-size: {SIZE_MICRO}px;
+    letter-spacing: 1px;
+    padding: 2px 10px;
+}}
+
+#GhostButton:hover {{
+    border-color: {GOLD_DIM};
+    color: {GOLD};
+}}
+
 #VoiceButton {{
     background-color: {BG_RAISED};
     border: 1px solid {GOLD_DIM};

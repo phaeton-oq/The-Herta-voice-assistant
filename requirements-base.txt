@@ -15,6 +15,9 @@ rich
 # --- Графическая оболочка (gui_app.py) ---
 PySide6
 pygments
+# Ключи API в системном хранилище: Credential Manager на Windows,
+# Secret Service на Linux. Без него ключи читаются только из .env.
+keyring
 
 # --- Взаимодействие с компьютером (desktop/) ---
 # keyboard ставит системный хук: на Windows иногда требует прав администратора.
