@@ -1,0 +1,19 @@
+# Голосовой тир: запись, сегментация, распознавание и синтез речи.
+# Тянет несколько гигабайт.
+#
+# ВАЖНО: torch здесь намеренно не указан. Колесо зависит от версии CUDA,
+# и его нужно ставить ПЕРВЫМ, до этого файла:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements-voice.txt
+#
+# Иначе pip подтянет torch как зависимость silero-vad — и это будет
+# сборка под CPU. Именно так и получается «а почему у меня всё медленно».
+# Установщик (install.ps1 / install.sh) соблюдает правильный порядок сам.
+
+sounddevice
+faster-whisper
+silero-vad
+edge-tts
+piper-tts
+omegaconf

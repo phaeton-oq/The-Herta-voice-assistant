@@ -1,0 +1,32 @@
+# Базовый тир: текстовая Герта, графическая оболочка, Telegram-мост,
+# управление компьютером и статический анализ.
+# Ставится за минуты, torch и модели распознавания речи не тянет.
+
+# --- LLM-провайдеры, конфиг, вывод ---
+ollama
+openai
+httpx
+google-genai
+numpy
+pydantic
+python-dotenv
+rich
+
+# --- Графическая оболочка (gui_app.py) ---
+PySide6
+pygments
+
+# --- Взаимодействие с компьютером (desktop/) ---
+# keyboard ставит системный хук: на Windows иногда требует прав администратора.
+keyboard
+pyperclip
+mss
+pillow
+# Управление громкостью и окнами на Windows. На Linux не нужны и не ставятся.
+pycaw; sys_platform == "win32"
+comtypes; sys_platform == "win32"
+pygetwindow; sys_platform == "win32"
+
+# --- Статический анализ (code tools и самопроверка) ---
+mypy
+ruff
