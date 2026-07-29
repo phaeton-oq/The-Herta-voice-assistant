@@ -45,14 +45,18 @@ DRY_RUN: bool = False
 
 
 class External(NamedTuple):
-    """Внешняя программа, которую pip поставить не может."""
+    """Внешняя программа, которую pip поставить не может.
+
+    Команда установки зависит от системы, поэтому храним их словарём по
+    менеджеру пакетов: печатать `apt install` человеку на Fedora — значит
+    сделать вид, что Linux бывает только один.
+    """
 
     name: str
     command: str
     why: str
-    winget: str
-    apt: str
     url: str
+    install: dict[str, str]
 
 
 EXTERNALS: Final[tuple[External, ...]] = (
@@ -60,27 +64,61 @@ EXTERNALS: Final[tuple[External, ...]] = (
         name='Ollama',
         command='ollama',
         why='локальные модели и зрение',
-        winget='winget install Ollama.Ollama',
-        apt='curl -fsSL https://ollama.com/install.sh | sh',
         url='https://ollama.com/download',
+        install={
+            'winget': 'winget install Ollama.Ollama',
+            # У Ollama один официальный скрипт на все дистрибутивы.
+            'apt': 'curl -fsSL https://ollama.com/install.sh | sh',
+            'dnf': 'curl -fsSL https://ollama.com/install.sh | sh',
+            'pacman': 'curl -fsSL https://ollama.com/install.sh | sh',
+            'zypper': 'curl -fsSL https://ollama.com/install.sh | sh',
+        },
     ),
     External(
         name='ffmpeg',
         command='ffmpeg',
         why='голосовые сообщения в Telegram',
-        winget='winget install Gyan.FFmpeg',
-        apt='sudo apt install ffmpeg',
         url='https://ffmpeg.org/download.html',
+        install={
+            'winget': 'winget install Gyan.FFmpeg',
+            'apt': 'sudo apt install ffmpeg',
+            'dnf': 'sudo dnf install ffmpeg',
+            'pacman': 'sudo pacman -S ffmpeg',
+            'zypper': 'sudo zypper install ffmpeg',
+        },
     ),
     External(
         name='git',
         command='git',
         why='обновление проекта и команды git в терминале Герты',
-        winget='winget install Git.Git',
-        apt='sudo apt install git',
         url='https://git-scm.com/downloads',
+        install={
+            'winget': 'winget install Git.Git',
+            'apt': 'sudo apt install git',
+            'dnf': 'sudo dnf install git',
+            'pacman': 'sudo pacman -S git',
+            'zypper': 'sudo zypper install git',
+        },
     ),
 )
+
+# Порядок важен: на системе с несколькими менеджерами берём первый найденный.
+PACKAGE_MANAGERS: Final[tuple[str, ...]] = ('apt', 'dnf', 'pacman', 'zypper')
+
+
+def package_manager() -> str:
+    """Какой менеджер пакетов есть в системе. На Windows — winget."""
+    if sys.platform == 'win32':
+        return 'winget'
+    for manager in PACKAGE_MANAGERS:
+        if shutil.which(manager) is not None:
+            return manager
+    return ''
+
+
+def install_hint(tool: External, manager: str) -> str:
+    """Команда установки под текущую систему, или пусто если не знаем."""
+    return tool.install.get(manager, '')
 
 
 def say(message: str = '') -> None:
@@ -327,10 +365,15 @@ def print_manual_steps(missing: list[External], env_created: bool) -> None:
         say('Ничего. Всё на месте.')
         return
 
-    windows = sys.platform == 'win32'
+    manager = package_manager()
     for tool in missing:
         say(f'* {tool.name} — {tool.why}')
-        say(f'    {tool.winget if windows else tool.apt}')
+        hint = install_hint(tool, manager)
+        if hint:
+            say(f'    {hint}')
+        else:
+            # Менеджер не опознали — не выдумываем команду, даём ссылку.
+            say('    менеджер пакетов не опознан, поставь как принято в твоём дистрибутиве')
         say(f'    или скачать: {tool.url}')
         say()
 
