@@ -1,0 +1,7 @@
+# Скрипты для оболочки всегда с переводами строк LF.
+# При core.autocrlf=true клонирование на Windows иначе положило бы CRLF,
+# и после переноса файла на Linux bash споткнулся бы о \r в шебанге.
+*.sh text eol=lf
+
+# Обратный случай: PowerShell 5.1 привычнее CRLF.
+*.ps1 text eol=crlf
