@@ -1,5 +1,7 @@
 ﻿from typing import Final
 
+from utils import tokens
+
 
 CORE_TRAITS: Final[list[str]] = [
     "Интеллектуальное превосходство как констатация факта, а не поза.",
@@ -562,15 +564,16 @@ def should_use_compact_bootstrap(model_name: str | None) -> bool:
 
 
 
-def build_bootstrap_messages(
-    model_name: str | None = None,
+def _assemble(
     *,
-    long_memory_block: str | None = None,
-    is_owner: bool = False,
+    model_name: str | None,
+    long_memory_block: str | None,
+    is_owner: bool,
+    compact: bool,
 ) -> list[dict[str, str]]:
-    examples = COMPACT_FEW_SHOT_EXAMPLES if should_use_compact_bootstrap(model_name) else FEW_SHOT_EXAMPLES
+    examples = COMPACT_FEW_SHOT_EXAMPLES if compact else FEW_SHOT_EXAMPLES
 
-    system_prompt = build_system_prompt(model_name)
+    system_prompt = COMPACT_SYSTEM_PROMPT if compact else build_system_prompt(model_name)
     if is_owner:
         system_prompt = f"{system_prompt}\n\n{build_owner_context()}"
     if long_memory_block:
@@ -580,3 +583,45 @@ def build_bootstrap_messages(
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": build_examples_block(examples)},
     ]
+
+
+def build_bootstrap_messages(
+    model_name: str | None = None,
+    *,
+    long_memory_block: str | None = None,
+    is_owner: bool = False,
+    context_window: int | None = None,
+) -> list[dict[str, str]]:
+    """Системный префикс диалога.
+
+    Компактная версия включается по двум причинам. Первая — слабая модель из
+    списка COMPACT_BOOTSTRAP_MODEL_PREFIXES: длинный промпт она держит хуже,
+    чем короткий. Вторая — тесное окно контекста: полная персона занимает
+    около семи тысяч токенов, и на локальной модели с окном в две тысячи она
+    просто обрезалась бы на середине, а модель об этом даже не сообщила бы.
+
+    Поэтому при заданном context_window решение принимается по факту: если
+    полная версия не влезает в отведённую под префикс долю окна, берётся
+    компактная. Список имён остаётся — он про способности модели, а не про
+    её память.
+    """
+    compact = should_use_compact_bootstrap(model_name)
+
+    if not compact and context_window:
+        full = _assemble(
+            model_name=model_name,
+            long_memory_block=long_memory_block,
+            is_owner=is_owner,
+            compact=False,
+        )
+        if tokens.estimate_messages(full) > tokens.prefix_budget(context_window):
+            compact = True
+        else:
+            return full
+
+    return _assemble(
+        model_name=model_name,
+        long_memory_block=long_memory_block,
+        is_owner=is_owner,
+        compact=compact,
+    )

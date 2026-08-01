@@ -38,6 +38,7 @@ from persona.the_herta import (
     needs_persona_repair,
 )
 from tts.edge_tts_engine import EdgeTTSEngine
+from utils import tokens
 from utils.logger import configure_logging
 from wakeword.coordinator import WakeWordCoordinator
 
@@ -1123,11 +1124,23 @@ def main() -> int:
     selected_model_name = config.google_ai.live_model if args.live_voice else _selected_model_name(config)
     long_memory_block = long_memory_store.format_for_prompt() if long_memory_store is not None else ''
     # Локальные режимы (консоль, голос) — за клавиатурой сам разработчик.
+    # Окно контекста известно только у локальной модели. Если полная персона
+    # в него не влезает, build_bootstrap_messages сам возьмёт компактную —
+    # иначе промпт молча обрезался бы, и Герта отвечала бы не в характере.
+    context_window = config.ollama.num_ctx if config.llm_provider == 'ollama' else None
     messages = build_bootstrap_messages(
         selected_model_name,
         long_memory_block=long_memory_block or None,
         is_owner=True,
+        context_window=context_window,
     )
+    if context_window:
+        used = tokens.estimate_messages(messages)
+        if used > tokens.prefix_budget(context_window):
+            logger.warning(
+                'Системный префикс ~%s токенов при окне %d. Подними OLLAMA_NUM_CTX минимум до %d.',
+                tokens.format_tokens(used), context_window, used * 2,
+            )
     if config.system_actions.enabled:
         provider_supports_tools = config.llm_provider in GOOGLE_AI_PROVIDER_NAMES or args.live_voice
         messages.append(

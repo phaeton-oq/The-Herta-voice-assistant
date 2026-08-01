@@ -44,6 +44,7 @@ from main import (
     update_owner_impression,
 )
 from persona.the_herta import build_bootstrap_messages
+from utils import tokens
 from utils.logger import configure_logging
 
 
@@ -56,10 +57,8 @@ def _shorten(value: str, limit: int = 18) -> str:
 
 
 def _estimate_context(messages: list[dict[str, str]]) -> str:
-    """Грубая оценка занятого контекста. Для русского ~3 символа на токен."""
-    characters = sum(len(message.get('content', '')) for message in messages)
-    tokens = characters / 3
-    return f'{tokens / 1000:.1f}k'
+    """Грубая оценка занятого контекста для панели состояния."""
+    return tokens.format_tokens(tokens.estimate_messages(messages))
 
 
 class ToolActivityBus(QObject):
@@ -475,10 +474,14 @@ class HertaApp(QObject):
         long_memory_block = (
             self.long_memory_store.format_for_prompt() if self.long_memory_store is not None else ''
         )
+        # Окно контекста знаем только у локальной модели: у облачных оно
+        # заведомо велико и ограничивать персону там незачем.
+        context_window = self.config.ollama.num_ctx if self.config.llm_provider == 'ollama' else None
         prefix = build_bootstrap_messages(
             _selected_model_name(self.config),
             long_memory_block=long_memory_block or None,
             is_owner=True,
+            context_window=context_window,
         )
         if self.config.system_actions.enabled:
             # Cerebras и Ollama structured tools не умеют. Если не сказать им
@@ -498,7 +501,24 @@ class HertaApp(QObject):
             profile_block = owner_profile.format_for_prompt()
             if profile_block:
                 prefix.append({'role': 'system', 'content': profile_block})
+
+        if context_window:
+            self._warn_if_prefix_too_big(prefix, context_window)
         return prefix
+
+    def _warn_if_prefix_too_big(self, prefix: list[dict[str, str]], window: int) -> None:
+        """Говорит вслух, если префикс съел окно локальной модели.
+
+        Молчаливое обрезание — худший исход: Герта начинает отвечать не в
+        характере, а причина не видна нигде.
+        """
+        used = tokens.estimate_messages(prefix)
+        if used <= tokens.prefix_budget(window):
+            return
+        self.window.add_system_message(
+            f'⚠ Системный префикс ~{tokens.format_tokens(used)} токенов при окне {window}. '
+            f'Подними OLLAMA_NUM_CTX минимум до {used * 2}, иначе от персоны останется огрызок.'
+        )
 
     def current_models(self) -> dict[str, str]:
         """Модель, выбранная для каждого провайдера. Нужно окну настроек."""

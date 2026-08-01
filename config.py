@@ -74,7 +74,9 @@ class OllamaConfig:
     keep_alive: str = '10m'
     think: bool = False
     temperature: float = 0.55
-    num_ctx: int = 2048
+    # Меньше 8192 ставить нельзя: системный префикс Герты занимает ~7000
+    # токенов, и в тесном окне он молча обрезается вместе с персоной.
+    num_ctx: int = 8192
     num_gpu: int | None = None
 
 
@@ -442,7 +444,7 @@ def load_config() -> AppConfig:
             keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '10m'),
             think=_get_bool(os.getenv('OLLAMA_THINK'), False),
             temperature=float(os.getenv('OLLAMA_TEMPERATURE', '0.55')),
-            num_ctx=int(os.getenv('OLLAMA_NUM_CTX', '2048')),
+            num_ctx=int(os.getenv('OLLAMA_NUM_CTX', '8192')),
             num_gpu=_get_optional_int(os.getenv('OLLAMA_NUM_GPU')),
         ),
         deepseek=DeepSeekConfig(
