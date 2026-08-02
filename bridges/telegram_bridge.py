@@ -477,7 +477,7 @@ class TelegramBridge:
             logger.warning('Не удалось записать реплику чата %s: %s', chat_id, exc)
 
     def _bootstrap_messages(self, chat_id: int) -> list[dict[str, str]]:
-        from main import _selected_model_name
+        from main import _selected_model_name, skill_index_message
         from persona.the_herta import build_bootstrap_messages
 
         # Долговременная память - контекст про владельца. Гостям её не показываем.
@@ -491,6 +491,10 @@ class TelegramBridge:
             long_memory_block=long_memory_block,
             is_owner=is_owner,
         )
+
+        skill_index = skill_index_message(self.config)
+        if skill_index is not None:
+            messages.append(skill_index)
 
         # Впечатление о конкретном человеке: у каждого чата своё.
         if self._people is not None:

@@ -172,12 +172,88 @@ def trim_history(
 
 
 
-def build_inference_messages(user_text: str, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+# Тело навыка вклинивается между персоной и репликой человека и отодвигает
+# правила манеры дальше от точки генерации. На живой проверке это сразу дало
+# возврат запрещённого захода «Поскольку...», который мы уже вычищали.
+# Короткое напоминание в хвосте навыка держит манеру на месте.
+SKILL_MANNER_REMINDER = (
+    '\n\nМанера прежняя: сразу к сути, без вводных вроде «Поскольку», '
+    '«Раз уж» и пересказа вопроса. Таблицы и списки — только когда они '
+    'действительно уместны, а не по привычке.'
+)
+
+# Библиотека навыков общая на процесс: файлы читаются один раз.
+# Через неё проходят все режимы — консоль, окно и Telegram-мост.
+_skill_library = None
+
+
+def get_skill_library(config: AppConfig):
+    """Ленивая загрузка навыков. None, если они выключены."""
+    global _skill_library
+    if not config.skills.enabled:
+        return None
+    if _skill_library is None:
+        from brain.skills import SkillLibrary
+
+        _skill_library = SkillLibrary.load(config.skills.directory)
+        logging.getLogger(__name__).info(
+            'Навыков загружено: %d (%s)',
+            len(_skill_library),
+            ', '.join(skill.name for skill in _skill_library.skills) or 'пусто',
+        )
+    return _skill_library
+
+
+def skill_index_message(config: AppConfig) -> dict[str, str] | None:
+    """Список навыков для постоянного префикса: только названия и описания.
+
+    Полные инструкции сюда не кладём — они стоят тысяч токенов и нужны
+    в лучшем случае раз в несколько реплик.
+    """
+    library = get_skill_library(config)
+    if library is None or not len(library):
+        return None
+    block = library.index_block()
+    return {'role': 'system', 'content': block} if block else None
+
+
+def build_inference_messages(
+    user_text: str,
+    messages: list[dict[str, str]],
+    *,
+    config: AppConfig | None = None,
+    chat_client: 'ChatClient | None' = None,
+) -> list[dict[str, str]]:
+    """Собирает то, что уйдёт модели на этот ход.
+
+    Сюда же подмешивается навык: постоянный префикс знает только список
+    названий, а подробные инструкции приходят на один ход и только когда
+    разговор действительно дошёл до дела. Иначе они занимали бы контекст
+    всегда — включая разговоры о погоде.
+    """
+    extras: list[dict[str, str]] = []
+
+    library = get_skill_library(config) if config is not None else None
+    if library is not None and len(library):
+        from brain.skills import choose
+
+        picked = choose(
+            library,
+            user_text,
+            chat_client if config is not None and config.skills.ask_model_when_unsure else None,
+        )
+        if picked is not None:
+            logging.getLogger(__name__).info('Навык на этот ход: %s', picked.name)
+            extras.append({'role': 'system', 'content': picked.body + SKILL_MANNER_REMINDER})
+
     hint = build_conversational_hint(user_text)
-    if hint is None or not messages:
+    if hint is not None:
+        extras.append({'role': 'system', 'content': hint})
+
+    if not extras or not messages:
         return messages
 
-    return [*messages[:-1], {"role": "system", "content": hint}, messages[-1]]
+    return [*messages[:-1], *extras, messages[-1]]
 
 
 
@@ -191,7 +267,9 @@ def generate_assistant_reply(
     if is_identity_query(user_text):
         return build_identity_reply(user_text)
 
-    inference_messages = build_inference_messages(user_text, messages)
+    inference_messages = build_inference_messages(
+        user_text, messages, config=config, chat_client=chat_client
+    )
     draft_reply = chat_client.chat(inference_messages)
     return apply_persona_postprocessing(
         user_text=user_text,
@@ -238,7 +316,9 @@ def generate_assistant_reply_with_tools(
     if is_identity_query(user_text):
         return build_identity_reply(user_text), []
 
-    inference_messages = build_inference_messages(user_text, messages)
+    inference_messages = build_inference_messages(
+        user_text, messages, config=config, chat_client=chat_client
+    )
     draft_reply, tool_results = chat_client.chat_with_tools(
         inference_messages,
         system_action_runner.tool_specs(),

@@ -41,6 +41,7 @@ from main import (
     _build_tts_engine,
     _prepare_stt_engine,
     _selected_model_name,
+    skill_index_message,
     update_owner_impression,
 )
 from persona.the_herta import build_bootstrap_messages
@@ -496,6 +497,10 @@ class HertaApp(QObject):
                     ),
                 }
             )
+        skill_index = skill_index_message(self.config)
+        if skill_index is not None:
+            prefix.append(skill_index)
+
         if self.people_store is not None:
             owner_profile = self.people_store.load(OWNER_PERSON_ID, 'владелец')
             profile_block = owner_profile.format_for_prompt()

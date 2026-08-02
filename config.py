@@ -333,6 +333,15 @@ class VisionConfig:
 
 
 @dataclass(slots=True)
+class SkillsConfig:
+    enabled: bool = True
+    directory: str = 'skills'
+    # Спрашивать модель, когда локально подошли сразу несколько навыков.
+    # Стоит одного дешёвого запроса и только в спорных случаях.
+    ask_model_when_unsure: bool = True
+
+
+@dataclass(slots=True)
 class PeopleConfig:
     """Профили собеседников: впечатление Герты и факты о человеке.
 
@@ -421,6 +430,7 @@ class AppConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     people: PeopleConfig = field(default_factory=PeopleConfig)
+    skills: SkillsConfig = field(default_factory=SkillsConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
     system_control: SystemControlConfig = field(default_factory=SystemControlConfig)
@@ -662,6 +672,11 @@ def load_config() -> AppConfig:
             enabled=_get_bool(os.getenv('PEOPLE_ENABLED'), False),
             directory=os.getenv('PEOPLE_DIR', 'data/people'),
             impression_every_turns=int(os.getenv('PEOPLE_IMPRESSION_EVERY_TURNS', '6')),
+        ),
+        skills=SkillsConfig(
+            enabled=_get_bool(os.getenv('SKILLS_ENABLED'), True),
+            directory=os.getenv('SKILLS_DIR', 'skills'),
+            ask_model_when_unsure=_get_bool(os.getenv('SKILLS_ASK_MODEL_WHEN_UNSURE'), True),
         ),
         vision=VisionConfig(
             enabled=_get_bool(os.getenv('VISION_ENABLED'), False),
