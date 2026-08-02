@@ -195,7 +195,7 @@ def get_skill_library(config: AppConfig):
     if _skill_library is None:
         from brain.skills import SkillLibrary
 
-        _skill_library = SkillLibrary.load(config.skills.directory)
+        _skill_library = SkillLibrary.load(config.skills.directory, config.skills.state_path)
         logging.getLogger(__name__).info(
             'Навыков загружено: %d (%s)',
             len(_skill_library),

@@ -1,4 +1,4 @@
-"""Навыки Герты: инструкции, которые подмешиваются только когда нужны.
+﻿"""Навыки Герты: инструкции, которые подмешиваются только когда нужны.
 
 Зачем это вообще. Системный префикс занимает около семи тысяч токенов и
 грузится всегда — даже когда речь о погоде. Каждый новый набор умений раньше
@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -124,18 +125,61 @@ class Match:
 
 
 class SkillLibrary:
-    def __init__(self, skills: list[Skill]) -> None:
+    """Все найденные навыки плюс отметки, какие из них выключены вручную.
+
+    Выключенный навык остаётся на диске и в списке — просто не попадает
+    ни в индекс, ни в подбор. Так его можно вернуть одним щелчком, не
+    удаляя файл.
+    """
+
+    def __init__(self, skills: list[Skill], *, state_path: str | Path | None = None) -> None:
         self.skills = skills
+        self.state_path = Path(state_path) if state_path else None
+        self.disabled: set[str] = self._read_state()
 
     def __len__(self) -> int:
-        return len(self.skills)
+        return len(self.enabled)
+
+    @property
+    def enabled(self) -> list[Skill]:
+        return [skill for skill in self.skills if skill.name not in self.disabled]
+
+    def is_enabled(self, name: str) -> bool:
+        return name not in self.disabled
+
+    def _read_state(self) -> set[str]:
+        if self.state_path is None or not self.state_path.exists():
+            return set()
+        try:
+            payload = json.loads(self.state_path.read_text(encoding='utf-8'))
+            return {str(name) for name in payload.get('disabled', [])}
+        except Exception as exc:
+            logger.warning('Состояние навыков не прочиталось: %s', exc)
+            return set()
+
+    def set_enabled(self, name: str, enabled: bool) -> None:
+        """Включает или выключает навык и сразу сохраняет решение."""
+        if enabled:
+            self.disabled.discard(name)
+        else:
+            self.disabled.add(name)
+        if self.state_path is None:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(
+                json.dumps({'disabled': sorted(self.disabled)}, ensure_ascii=False, indent=2),
+                encoding='utf-8',
+            )
+        except OSError as exc:
+            logger.warning('Состояние навыков не сохранилось: %s', exc)
 
     @classmethod
-    def load(cls, directory: str | Path) -> 'SkillLibrary':
+    def load(cls, directory: str | Path, state_path: str | Path | None = None) -> 'SkillLibrary':
         root = Path(directory)
         if not root.exists():
             logger.info('Папки навыков нет: %s', root)
-            return cls([])
+            return cls([], state_path=state_path)
 
         skills: list[Skill] = []
         for path in sorted(root.glob('*/SKILL.md')):
@@ -144,7 +188,7 @@ class SkillLibrary:
             except Exception as exc:
                 # Один битый навык не должен лишать Герту остальных.
                 logger.warning('Навык пропущен: %s', exc)
-        return cls(skills)
+        return cls(skills, state_path=state_path)
 
     def by_name(self, name: str) -> Skill | None:
         lowered = name.strip().lower()
@@ -159,10 +203,11 @@ class SkillLibrary:
         Только названия и описания: полный текст навыка стоит тысячи
         токенов и в постоянной части ему делать нечего.
         """
-        if not self.skills:
+        active = self.enabled
+        if not active:
             return ''
         lines = ['Твои навыки. Подробные инструкции приходят, когда разговор доходит до дела:']
-        lines.extend(f'- {skill.name}: {skill.description}' for skill in self.skills)
+        lines.extend(f'- {skill.name}: {skill.description}' for skill in active)
         return '\n'.join(lines)
 
     def match(self, text: str) -> Match:
@@ -173,7 +218,7 @@ class SkillLibrary:
         Если не совпало ничего, навык не нужен: обычный разговор не должен
         стоить лишнего запроса.
         """
-        scored = [(skill, skill.score(text)) for skill in self.skills]
+        scored = [(skill, skill.score(text)) for skill in self.enabled]
         hits = [(skill, value) for skill, value in scored if value > 0]
         if not hits:
             return Match(None)

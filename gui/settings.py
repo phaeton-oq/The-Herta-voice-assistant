@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -138,9 +139,18 @@ class SettingsDialog(QDialog):
 
     provider_apply_requested = Signal(str, str)
     keys_changed = Signal()
+    skills_changed = Signal()
 
-    def __init__(self, parent: QWidget | None, *, provider: str, models: dict[str, str]) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None,
+        *,
+        provider: str,
+        models: dict[str, str],
+        library=None,
+    ) -> None:
         super().__init__(parent)
+        self._library = library
         self.setWindowTitle('Настройки Герты')
         self.setModal(True)
         self.setMinimumWidth(560)
@@ -199,6 +209,27 @@ class SettingsDialog(QDialog):
             row.changed.connect(self.keys_changed)
             self.rows.append(row)
             root.addWidget(self._labelled(slot.label, row))
+
+        # --- Навыки ---
+        if self._library is not None and self._library.skills:
+            root.addWidget(self._separator())
+            root.addWidget(self._section_title('Навыки'))
+            hint = QLabel(
+                'Выключенный навык остаётся на диске, но не подмешивается в разговор '
+                'и не занимает место в постоянном промпте.'
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f'color: {T.TEXT_DIM}; font-size: 11px;')
+            root.addWidget(hint)
+
+            for skill in self._library.skills:
+                box = QCheckBox(f'{skill.title} — {skill.description}')
+                box.setChecked(self._library.is_enabled(skill.name))
+                box.toggled.connect(
+                    lambda checked, name=skill.name: self._on_skill_toggled(name, checked)
+                )
+                box.setStyleSheet(f'color: {T.TEXT}; font-size: 12px;')
+                root.addWidget(box)
 
         root.addStretch(1)
 
@@ -268,6 +299,13 @@ class SettingsDialog(QDialog):
         model = self.model_field.text().strip()
         self._models[provider] = model
         self.provider_apply_requested.emit(provider, model)
+
+    def _on_skill_toggled(self, name: str, enabled: bool) -> None:
+        """Переключение сохраняется сразу: отдельной кнопки «применить» нет."""
+        if self._library is None:
+            return
+        self._library.set_enabled(name, enabled)
+        self.skills_changed.emit()
 
     def refresh_keys(self) -> None:
         for row in self.rows:

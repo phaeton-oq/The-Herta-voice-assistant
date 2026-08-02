@@ -550,14 +550,39 @@ class HertaApp(QObject):
     def open_settings(self) -> None:
         from gui.settings import SettingsDialog
 
+        from main import get_skill_library
+
         dialog = SettingsDialog(
-            self.window, provider=self.config.llm_provider, models=self.current_models()
+            self.window,
+            provider=self.config.llm_provider,
+            models=self.current_models(),
+            library=get_skill_library(self.config),
         )
         dialog.provider_apply_requested.connect(self.apply_provider)
         dialog.keys_changed.connect(self._on_keys_changed)
+        dialog.skills_changed.connect(self._on_skills_changed)
         self._settings_dialog = dialog
         dialog.exec()
         self._settings_dialog = None
+
+    @Slot()
+    def _on_skills_changed(self) -> None:
+        """Пересобирает префикс: индекс навыков в нём изменился.
+
+        Историю разговора сохраняем — переключение навыка не повод терять
+        беседу. Перезапуск провайдера здесь не нужен, меняется только текст.
+        """
+        if self._text_thread is not None or self._voice_worker is not None:
+            return
+        tail = self.messages[self.locked_prefix_count:]
+        self.messages[:] = self._build_prefix() + tail
+        self.locked_prefix_count = len(self.messages) - len(tail)
+
+        from main import get_skill_library
+
+        library = get_skill_library(self.config)
+        active = ', '.join(skill.name for skill in library.enabled) if library else ''
+        self.window.add_system_message(f'Навыки: {active or "все выключены"}.')
 
     @Slot()
     def _on_keys_changed(self) -> None:

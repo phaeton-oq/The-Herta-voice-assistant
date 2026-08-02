@@ -336,6 +336,9 @@ class VisionConfig:
 class SkillsConfig:
     enabled: bool = True
     directory: str = 'skills'
+    # Какие навыки выключены вручную. Лежит рядом с остальными данными,
+    # а не в .env: это состояние переключателя, а не настройка установки.
+    state_path: str = 'data/skills_state.json'
     # Спрашивать модель, когда локально подошли сразу несколько навыков.
     # Стоит одного дешёвого запроса и только в спорных случаях.
     ask_model_when_unsure: bool = True
@@ -676,6 +679,7 @@ def load_config() -> AppConfig:
         skills=SkillsConfig(
             enabled=_get_bool(os.getenv('SKILLS_ENABLED'), True),
             directory=os.getenv('SKILLS_DIR', 'skills'),
+            state_path=os.getenv('SKILLS_STATE_PATH', 'data/skills_state.json'),
             ask_model_when_unsure=_get_bool(os.getenv('SKILLS_ASK_MODEL_WHEN_UNSURE'), True),
         ),
         vision=VisionConfig(
