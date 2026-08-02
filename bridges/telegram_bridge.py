@@ -43,6 +43,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 API_BASE = 'https://api.telegram.org'
+# Сколько неудачных опросов подряд терпим, прежде чем пересоздать соединение.
+HTTP_FAILURES_BEFORE_RESET = 3
 TELEGRAM_HARD_LIMIT = 4096
 
 HELP_TEXT = (
@@ -153,12 +155,45 @@ class TelegramBridge:
             except Exception as exc:
                 logger.warning('Не удалось открыть хранилище истории, работаю без него: %s', exc)
 
-        client_kwargs: dict[str, Any] = {'timeout': self.telegram.request_timeout_seconds}
-        if self.telegram.proxy:
-            client_kwargs['proxy'] = self.telegram.proxy
-        self._http = httpx.Client(**client_kwargs)
+        self._http = self._new_http_client()
+        self._failures = 0
 
         self._search_runner = self._build_search_runner()
+
+    def _new_http_client(self) -> httpx.Client:
+        """Клиент с раздельными таймаутами.
+
+        Одно число на все фазы не годится: чтение долгого опроса обязано
+        ждать дольше, чем установка соединения. Читаем на 15 секунд дольше
+        поллинга — Telegram держит запрос ровно poll_timeout, и запас нужен
+        только на сеть.
+        """
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=self.telegram.poll_timeout_seconds + 15.0,
+            write=self.telegram.request_timeout_seconds,
+            pool=10.0,
+        )
+        client_kwargs: dict[str, Any] = {'timeout': timeout}
+        if self.telegram.proxy:
+            client_kwargs['proxy'] = self.telegram.proxy
+        return httpx.Client(**client_kwargs)
+
+    def _reset_http(self, reason: str) -> None:
+        """Пересоздаёт клиент вместе с пулом соединений.
+
+        После сна ноутбука в пуле остаются соединения, которые выглядят
+        живыми, но мертвы: запрос уходит в никуда, а ответа нет. Мост из-за
+        этого замолкал на сутки, оставаясь на вид работающим. Дешевле
+        выбросить пул целиком, чем разбираться, какое из соединений гнилое.
+        """
+        logger.warning('Пересоздаю HTTP-клиент Telegram: %s', reason)
+        try:
+            self._http.close()
+        except Exception:
+            pass
+        self._http = self._new_http_client()
+        self._failures = 0
 
     # ---------- Инструменты ----------
 
@@ -776,10 +811,23 @@ class TelegramBridge:
             if self._offset is not None:
                 payload['offset'] = self._offset
 
+            started = time.monotonic()
             data = self._api('getUpdates', payload)
+            elapsed = time.monotonic() - started
+
             if data is None:
+                # Несколько отказов подряд — почти всегда протухший пул,
+                # а не проблема на стороне Telegram.
+                self._failures += 1
+                if self._failures >= HTTP_FAILURES_BEFORE_RESET:
+                    self._reset_http(f'{self._failures} неудачных опросов подряд')
                 time.sleep(3.0)
                 continue
+
+            self._failures = 0
+            if elapsed > self.telegram.poll_timeout_seconds + 10:
+                logger.warning('Опрос занял %.0fs вместо %ss — сеть тормозит.',
+                               elapsed, self.telegram.poll_timeout_seconds)
 
             for update in data.get('result', []):
                 self._offset = int(update['update_id']) + 1
