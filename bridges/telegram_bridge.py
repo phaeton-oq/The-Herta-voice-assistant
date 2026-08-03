@@ -56,7 +56,8 @@ HELP_TEXT = (
     '/voice - как отвечать голосом: на голосовые / всегда / никогда\n'
     '/reset - забыть текущий разговор\n'
     '/whoami - показать твой chat id\n'
-    '/help - это сообщение'
+    '/help - это сообщение\n\n'
+    'Владельцу дополнительно: /admin, /skills, /people'
 )
 
 
@@ -612,7 +613,96 @@ class TelegramBridge:
             }[self.telegram.voice_reply_mode]
             self._send_message(chat_id, f'Режим голоса: {description}.')
             return True
+        # У этих команд есть аргументы, поэтому сравниваем первое слово:
+        # base здесь — вся строка целиком, а не только имя команды.
+        head = base.split()[0] if base.split() else base
+        if head == '/skills' and self._is_owner(chat_id):
+            self._handle_skills(chat_id, command)
+            return True
+        if head == '/admin' and self._is_owner(chat_id):
+            self._send_admin_panel(chat_id)
+            return True
         return False
+
+    def _handle_skills(self, chat_id: int, command: str) -> None:
+        """Список навыков и переключение. Только владельцу.
+
+        Гостю переключатель не даём: выключив research, он потом удивится,
+        почему Герта перестала искать, и решит, что она сломалась.
+        """
+        from main import get_skill_library
+
+        library = get_skill_library(self.config)
+        if library is None or not library.skills:
+            self._send_message(chat_id, 'Навыки выключены в настройках или папка пуста.')
+            return
+
+        parts = command.split()
+        if len(parts) == 3 and parts[1].lower() in ('on', 'off'):
+            name = parts[2].lower()
+            if library.by_name(name) is None:
+                self._send_message(chat_id, f'Навыка «{name}» нет. /skills покажет список.')
+                return
+            wanted = parts[1].lower() == 'on'
+            library.set_enabled(name, wanted)
+            # Сессии держат старый префикс с прежним индексом — сбрасываем,
+            # иначе изменение доедет только до новых собеседников.
+            self._sessions.clear()
+            self._send_message(
+                chat_id, f'Навык {name}: {"включён" if wanted else "выключен"}.'
+            )
+            return
+
+        lines = ['<b>Навыки</b>', '']
+        for skill in library.skills:
+            mark = '🟣' if library.is_enabled(skill.name) else '⚪'
+            lines.append(f'{mark} <b>{skill.name}</b> — {skill.description}')
+        lines.append('')
+        lines.append('Переключить: <code>/skills off study</code>')
+        self._send_message(chat_id, '\n'.join(lines))
+
+    def _send_admin_panel(self, chat_id: int) -> None:
+        """Сводка для владельца: что работает, кто пишет, сколько накопилось."""
+        from main import _selected_model_name, get_skill_library
+
+        lines = ['<b>Панель</b>', '']
+
+        lines.append('<b>Мозг</b>')
+        lines.append(f'· провайдер: {self.config.llm_provider} · {_selected_model_name(self.config)}')
+        library = get_skill_library(self.config)
+        active = ', '.join(s.name for s in library.enabled) if library else '—'
+        lines.append(f'· навыки: {active or "все выключены"}')
+        lines.append(f'· зрение: {self.config.vision.model if self.config.vision.enabled else "выключено"}')
+        search = self.web_search_provider is not None and self.web_search_provider.enabled
+        lines.append(f'· веб-поиск: {"включён" if search else "выключен"}')
+
+        lines.append('')
+        lines.append('<b>Канал</b>')
+        voice = 'выключены' if not self.telegram.voice_enabled else self.telegram.voice_reply_mode
+        lines.append(f'· голосовые: {voice}')
+        allowed = self.telegram.allowed_chat_ids
+        lines.append(f'· доступ: {len(allowed) if allowed else "открыт всем"}')
+        lines.append(f'· активных сессий: {len(self._sessions)}')
+
+        if self._store is not None:
+            lines.append('')
+            lines.append('<b>Кто пишет</b>')
+            for info in self._store.all_stats():
+                who = 'ты' if self._is_owner(info.chat_id) else 'гость'
+                name = f'@{info.username}' if info.username else str(info.chat_id)
+                lines.append(
+                    f'· {name} ({who}) — обращений {info.turns}, реплик {info.stored_messages}'
+                )
+
+        if self._people is not None:
+            profiles = self._people.everyone()
+            with_opinion = sum(1 for p in profiles if p.impression)
+            lines.append('')
+            lines.append(f'<b>Профили:</b> {len(profiles)}, из них с мнением {with_opinion}')
+
+        lines.append('')
+        lines.append('Команды: /skills · /people · /voice · /impression')
+        self._send_message(chat_id, '\n'.join(lines))
 
     def _send_impression(self, chat_id: int) -> None:
         """Показывает человеку, что она о нём думает. Честно, как есть."""

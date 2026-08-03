@@ -153,6 +153,19 @@ class TelegramStore:
         with self._lock:
             return self._connection.execute('SELECT COUNT(*) FROM chats').fetchone()[0]
 
+    def all_stats(self) -> list[ChatStats]:
+        """Все известные чаты с числом обращений. Для панели владельца."""
+        with self._lock:
+            rows = self._connection.execute(
+                'SELECT c.chat_id, c.username, c.turns, '
+                '  (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.chat_id) '
+                'FROM chats c ORDER BY c.turns DESC'
+            ).fetchall()
+        return [
+            ChatStats(chat_id=chat_id, username=username, turns=turns, stored_messages=stored)
+            for chat_id, username, turns, stored in rows
+        ]
+
     def close(self) -> None:
         with self._lock:
             try:

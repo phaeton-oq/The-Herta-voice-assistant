@@ -38,7 +38,13 @@ FRONTMATTER_RE: Final[re.Pattern[str]] = re.compile(
     r'\A---[ \t]*\r?\n(?P<meta>.*?)\r?\n---[ \t]*\r?\n(?P<body>.*)\Z',
     re.DOTALL,
 )
-LIST_FIELDS: Final[frozenset[str]] = frozenset({'triggers', 'tools'})
+LIST_FIELDS: Final[frozenset[str]] = frozenset({'triggers', 'tools', 'strong'})
+
+# Порог срабатывания. Одна обычная примета его не берёт: разбор настоящих
+# переписок показал, что «тест» в «тестировании UI/UX» и «почему» в личном
+# вопросе включали навык там, где он только мешал.
+MIN_SCORE: Final[int] = 2
+WEAK_POINTS: Final[int] = 1
 REQUIRED_FIELDS: Final[tuple[str, ...]] = ('name', 'title', 'description')
 
 
@@ -50,15 +56,24 @@ class Skill:
     triggers: tuple[str, ...]
     tools: tuple[str, ...]
     body: str
+    # Приметы, которых достаточно поодиночке: их ни с чем не спутать.
+    strong: tuple[str, ...] = ()
 
     def score(self, text: str) -> int:
-        """Сколько разных примет навыка встретилось в реплике.
+        """Насколько уверенно реплика похожа на работу для этого навыка.
 
-        Считаем именно разные: пять упоминаний слова «код» — это всё ещё
-        один сигнал, а «код» вместе с «mypy» и «тест» — уже три.
+        Обычная примета даёт один балл, безошибочная — сразу проходной.
+        Разделение появилось после разбора настоящих переписок: слова
+        «тест», «почему», «исследован» встречаются в обычной речи и
+        поодиночке ничего не значат, а «mypy» или «traceback» — значат.
+
+        Считаем разные приметы: пять упоминаний слова «код» — всё ещё один
+        сигнал, а «код» вместе с «функция» — уже два.
         """
         lowered = text.lower()
-        return sum(1 for trigger in self.triggers if trigger in lowered)
+        total = sum(WEAK_POINTS for trigger in self.triggers if trigger in lowered)
+        total += sum(MIN_SCORE for trigger in self.strong if trigger in lowered)
+        return total
 
 
 def _parse_meta(raw: str, source: Path) -> dict[str, object]:
@@ -92,7 +107,10 @@ def _parse_meta(raw: str, source: Path) -> dict[str, object]:
 
 
 def load_skill(path: Path) -> Skill:
-    text = path.read_text(encoding='utf-8')
+    # utf-8-sig, а не utf-8: файлы навыков правят руками, и Блокнот с
+    # PowerShell дописывают в начало метку BOM. С ней заголовок перестаёт
+    # начинаться с «---», и навык молча пропадает.
+    text = path.read_text(encoding='utf-8-sig')
     match = FRONTMATTER_RE.match(text)
     if match is None:
         raise ValueError(f'{path}: нет заголовка между строками «---»')
@@ -108,6 +126,7 @@ def load_skill(path: Path) -> Skill:
         description=str(meta['description']),
         triggers=tuple(meta.get('triggers', ())),  # type: ignore[arg-type]
         tools=tuple(meta.get('tools', ())),  # type: ignore[arg-type]
+        strong=tuple(meta.get('strong', ())),  # type: ignore[arg-type]
         body=match.group('body').strip(),
     )
 
@@ -219,7 +238,7 @@ class SkillLibrary:
         стоить лишнего запроса.
         """
         scored = [(skill, skill.score(text)) for skill in self.enabled]
-        hits = [(skill, value) for skill, value in scored if value > 0]
+        hits = [(skill, value) for skill, value in scored if value >= MIN_SCORE]
         if not hits:
             return Match(None)
 

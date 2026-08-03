@@ -2,7 +2,8 @@
 name: code
 title: Работа с кодом
 description: разбор чужого и своего кода, проверка типов и стиля, тесты, переход к ошибке
-triggers: [код, функци, класс, метод, модул, переменн, mypy, ruff, линт, тест, pytest, ошибк, баг, падает, исключен, traceback, рефактор, типизац, аннотац, импорт, питон, python, скрипт]
+triggers: [код, функци, класс, метод, модул, переменн, линт, тест, ошибк, баг, падает, исключен, рефактор, типизац, аннотац, импорт, питон, скрипт]
+strong: [mypy, ruff, pytest, traceback, indexerror, typeerror, valueError, attributeerror, стектрейс]
 tools: [type_check, lint_code, open_in_editor, goto_error, list_problems, run_tests]
 ---
 
