@@ -1,4 +1,4 @@
-"""Telegram-мост: люди пишут Герте в чат, она отвечает в характере.
+﻿"""Telegram-мост: люди пишут Герте в чат, она отвечает в характере.
 
 Работает на long polling через httpx, без внешних telegram-библиотек.
 
@@ -653,21 +653,21 @@ class TelegramBridge:
             )
             return
 
-        lines = ['<b>Навыки</b>', '']
+        lines = ['**Навыки**', '']
         for skill in library.skills:
             mark = '🟣' if library.is_enabled(skill.name) else '⚪'
-            lines.append(f'{mark} <b>{skill.name}</b> — {skill.description}')
+            lines.append(f'{mark} **{skill.name}** — {skill.description}')
         lines.append('')
-        lines.append('Переключить: <code>/skills off study</code>')
+        lines.append('Переключить: `/skills off study`')
         self._send_message(chat_id, '\n'.join(lines))
 
     def _send_admin_panel(self, chat_id: int) -> None:
         """Сводка для владельца: что работает, кто пишет, сколько накопилось."""
         from main import _selected_model_name, get_skill_library
 
-        lines = ['<b>Панель</b>', '']
+        lines = ['**Панель**', '']
 
-        lines.append('<b>Мозг</b>')
+        lines.append('**Мозг**')
         lines.append(f'· провайдер: {self.config.llm_provider} · {_selected_model_name(self.config)}')
         library = get_skill_library(self.config)
         active = ', '.join(s.name for s in library.enabled) if library else '—'
@@ -677,7 +677,7 @@ class TelegramBridge:
         lines.append(f'· веб-поиск: {"включён" if search else "выключен"}')
 
         lines.append('')
-        lines.append('<b>Канал</b>')
+        lines.append('**Канал**')
         voice = 'выключены' if not self.telegram.voice_enabled else self.telegram.voice_reply_mode
         lines.append(f'· голосовые: {voice}')
         allowed = self.telegram.allowed_chat_ids
@@ -686,7 +686,7 @@ class TelegramBridge:
 
         if self._store is not None:
             lines.append('')
-            lines.append('<b>Кто пишет</b>')
+            lines.append('**Кто пишет**')
             for info in self._store.all_stats():
                 who = 'ты' if self._is_owner(info.chat_id) else 'гость'
                 name = f'@{info.username}' if info.username else str(info.chat_id)
@@ -698,7 +698,7 @@ class TelegramBridge:
             profiles = self._people.everyone()
             with_opinion = sum(1 for p in profiles if p.impression)
             lines.append('')
-            lines.append(f'<b>Профили:</b> {len(profiles)}, из них с мнением {with_opinion}')
+            lines.append(f'**Профили:** {len(profiles)}, из них с мнением {with_opinion}')
 
         lines.append('')
         lines.append('Команды: /skills · /people · /voice · /impression')
